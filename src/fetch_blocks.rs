@@ -43,8 +43,8 @@ lazy_static::lazy_static! {
                     .duration_since(SystemTime::UNIX_EPOCH)
                     .unwrap()
                     .as_secs() as i64,
-                bitcoin::network::Address::new(&([0, 0, 0, 0], 8332).into(), ServiceFlags::NONE),
-                bitcoin::network::Address::new(&([0, 0, 0, 0], 8332).into(), ServiceFlags::NONE),
+                bitcoin::network::Address::new(&([127, 0, 0, 1], 8332).into(), ServiceFlags::NONE),
+                bitcoin::network::Address::new(&([127, 0, 0, 1], 8332).into(), ServiceFlags::NONE),
                 rand::random(),
                 format!("BTC RPC Proxy v{}", env!("CARGO_PKG_VERSION")),
                 0,
