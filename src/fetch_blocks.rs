@@ -151,7 +151,13 @@ impl Write for BitcoinPeerConnection {
     }
 }
 impl BitcoinPeerConnection {
-    pub async fn connect(state: Arc<State>, addr: Arc<String>) -> Result<Self, Error> {
+    pub async fn connect(state: Arc<State>, mut addr: Arc<String>) -> Result<Self, Error> {
+        if !addr.contains(":") {
+            let addr_ref = &*addr;
+            let mut addr_owned = addr_ref.clone();
+            addr_owned.push_str(":8333");
+            addr = Arc::new(addr_owned);
+        }
         tokio::time::timeout(
             state.peer_timeout,
             tokio::task::spawn_blocking(move || {
