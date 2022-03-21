@@ -366,10 +366,17 @@ async fn fetch_block_from_peers(
             }
             futures::future::ready(())
         });
-    let b = futures::select! {
-        b = recv.next().fuse() => b,
-        _ = runner.boxed().fuse() => None,
+    let mut blk_future = recv.next().fuse();
+    let mut b = futures::select! {
+        b = &mut blk_future => b,
+        _ = runner.boxed().fuse() => None
     };
+    if b.is_none() {
+        b = match futures::poll!(blk_future) {
+            tokio::macros::support::Poll::Ready(Some(b)) => Some(b),
+            _ => None,
+        };
+    }
     b
 }
 
