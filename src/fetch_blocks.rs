@@ -153,10 +153,7 @@ impl Write for BitcoinPeerConnection {
 impl BitcoinPeerConnection {
     pub async fn connect(state: Arc<State>, mut addr: Arc<String>) -> Result<Self, Error> {
         if !addr.contains(":") {
-            let addr_ref = &*addr;
-            let mut addr_owned = addr_ref.clone();
-            addr_owned.push_str(":8333");
-            addr = Arc::new(addr_owned);
+            addr = Arc::new(format!("{}:8333", &*addr));
         }
         tokio::time::timeout(
             state.peer_timeout,
@@ -379,7 +376,7 @@ async fn fetch_block_from_peers(
     };
     if b.is_none() {
         b = match futures::poll!(blk_future) {
-            tokio::macros::support::Poll::Ready(Some(b)) => Some(b),
+            std::task::Poll::Ready(Some(b)) => Some(b),
             _ => None,
         };
     }
