@@ -48,9 +48,10 @@ pub async fn proxy_request(
                                         debug!(
                                             state_local_ok.logger,
                                             "processed request";
+                                            "params" => serde_json::to_string(&req.params).unwrap_or_default(),
                                             "user" => name_local_ok,
                                             "method" => req.method.0.clone(),
-                                            "action" => action_description
+                                            "action" => action_description,
                                         );
                                         res
                                     })
@@ -58,6 +59,7 @@ pub async fn proxy_request(
                                         warn!(
                                             state_local_err.logger,
                                             "failed request";
+                                            "params" => serde_json::to_string(&req.params).unwrap_or_default(),
                                             "user" => name_local_err,
                                             "method" => req.method.0.clone(),
                                             "error_code" => error.code,
