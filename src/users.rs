@@ -43,14 +43,19 @@ pub mod input {
     }
 
     pub fn map_default(users: HashMap<String, User>, default_fetch_blocks: bool) -> super::Users {
-        super::Users(users.into_iter().map(|(name, user)| (name, user.map_default(default_fetch_blocks))).collect())
+        super::Users(
+            users
+                .into_iter()
+                .map(|(name, user)| (name, user.map_default(default_fetch_blocks)))
+                .collect(),
+        )
     }
 }
 
 mod password {
-    use std::fmt;
     use std::convert::TryFrom;
     use std::ffi::{OsStr, OsString};
+    use std::fmt;
 
     #[derive(serde::Deserialize)]
     #[serde(try_from = "String")]
@@ -60,7 +65,10 @@ mod password {
         fn validate_str(string: &str) -> Result<(), InvalidPasswordError> {
             for (pos, byte) in string.bytes().enumerate() {
                 if byte <= 0x1F || byte >= 0x7F {
-                    return Err(InvalidPasswordError(InvalidPasswordErrorInner::BadChar { pos, byte, }))
+                    return Err(InvalidPasswordError(InvalidPasswordErrorInner::BadChar {
+                        pos,
+                        byte,
+                    }));
                 }
             }
             Ok(())
@@ -95,13 +103,17 @@ mod password {
         type Error = InvalidPasswordError;
 
         fn parse_arg(arg: &OsStr) -> Result<Self, Self::Error> {
-            let string = arg.to_str().ok_or(InvalidPasswordError(InvalidPasswordErrorInner::NonAscii))?;
+            let string = arg
+                .to_str()
+                .ok_or(InvalidPasswordError(InvalidPasswordErrorInner::NonAscii))?;
             Password::validate_str(string)?;
             Ok(Password(string.to_owned()))
         }
 
         fn parse_owned_arg(arg: OsString) -> Result<Self, Self::Error> {
-            let string = arg.into_string().map_err(|_| InvalidPasswordError(InvalidPasswordErrorInner::NonAscii))?;
+            let string = arg
+                .into_string()
+                .map_err(|_| InvalidPasswordError(InvalidPasswordErrorInner::NonAscii))?;
             Password::validate_str(&string)?;
             Ok(Password(string.to_owned()))
         }
@@ -116,15 +128,14 @@ mod password {
             // timing safe equality
             #[inline(never)]
             fn xor_contents(a: &[u8], b: &[u8]) -> usize {
-                a
-                    .iter()
+                a.iter()
                     .enumerate()
                     .map(|(i, byte)| *byte ^ b[i % b.len()])
                     .fold(a.len() ^ b.len(), |acc, item| acc | usize::from(item))
             }
 
             if self.0.is_empty() {
-                return other.is_empty()
+                return other.is_empty();
             }
 
             let bits = xor_contents(self.0.as_bytes(), other.as_bytes());
@@ -141,7 +152,7 @@ mod password {
     #[derive(Debug, thiserror::Error)]
     enum InvalidPasswordErrorInner {
         #[error("invalid byte 0x{byte:02X} at position {pos}")]
-        BadChar { pos: usize, byte: u8, },
+        BadChar { pos: usize, byte: u8 },
         // non-utf-8 implies non-ascii
         #[error("not an ascii string")]
         NonAscii,
@@ -284,14 +295,6 @@ impl User {
                     }
                     _ => Ok(None), // TODO
                 }
-            } else if self.fetch_blocks && &*req.method == GetBlockchainInfo.as_str() {
-                let mut res = state.rpc_client.call(req).await?;
-                res.result.as_mut().map(|r| match r {
-                    Value::Object(o) => o.get_mut("pruned").map(|p| *p = Value::Bool(false)),
-                    _ => None,
-                });
-
-                Ok(Some(res))
             } else {
                 Ok(None)
             }
@@ -312,11 +315,14 @@ mod tests {
 
     fn check(input: Option<bool>, default: bool, expected: bool) {
         let mut users = HashMap::new();
-        users.insert("satoshi".to_owned(), super::input::User {
-            password: "secret".try_into().expect("failed to create password"),
-            allowed_calls: HashSet::new(),
-            fetch_blocks: input,
-        });
+        users.insert(
+            "satoshi".to_owned(),
+            super::input::User {
+                password: "secret".try_into().expect("failed to create password"),
+                allowed_calls: HashSet::new(),
+                fetch_blocks: input,
+            },
+        );
 
         let result = super::input::map_default(users, default);
         assert_eq!(result.0["satoshi"].fetch_blocks, expected);
