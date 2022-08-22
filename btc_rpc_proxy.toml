@@ -5,7 +5,6 @@ bind_address = "127.0.0.1"
 [user.public]
 password = "public"
 allowed_calls = [
-	"getinfo",
 	"getblock",
 	"getblockchaininfo",
 	"getbestblockhash",
@@ -26,8 +25,5 @@ allowed_calls = [
 	"decodescript",
 	"getrawtransaction",
 	"sendrawtransaction",
-	"estimatefee",
-	"estimatepriority",
-	"estimatesmartfee",
-	"estimatesmartpriority"
+	"estimatesmartfee"
 ]
