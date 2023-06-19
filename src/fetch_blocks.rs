@@ -4,7 +4,6 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::Error;
 use async_channel as mpmc;
 use bitcoin::{
     consensus::{Decodable, Encodable},
@@ -17,7 +16,9 @@ use bitcoin::{
     },
     Block,
 };
+use color_eyre::eyre::Error;
 use futures::FutureExt;
+use http::HeaderValue;
 use socks::Socks5Stream;
 
 use crate::client::{
@@ -43,8 +44,8 @@ lazy_static::lazy_static! {
                     .duration_since(SystemTime::UNIX_EPOCH)
                     .unwrap()
                     .as_secs() as i64,
-                bitcoin::network::Address::new(&([127, 0, 0, 1], 8332).into(), ServiceFlags::NONE),
-                bitcoin::network::Address::new(&([127, 0, 0, 1], 8332).into(), ServiceFlags::NONE),
+                bitcoin::network::Address::new(&([127, 0, 0, 1], 8333).into(), ServiceFlags::NONE),
+                bitcoin::network::Address::new(&([127, 0, 0, 1], 8333).into(), ServiceFlags::NONE),
                 0,
                 format!("BTC RPC Proxy v{}", env!("CARGO_PKG_VERSION")),
                 0,
@@ -73,14 +74,17 @@ impl Peers {
     pub fn is_empty(&self) -> bool {
         self.peers.is_empty()
     }
-    pub async fn updated(client: &RpcClient) -> Result<Self, PeerUpdateError> {
+    pub async fn updated(client: &RpcClient, auth: &HeaderValue) -> Result<Self, PeerUpdateError> {
         Ok(Self {
             peers: client
-                .call(&RpcRequest {
-                    id: None,
-                    method: GetPeerInfo,
-                    params: [],
-                })
+                .call(
+                    auth,
+                    &RpcRequest {
+                        id: None,
+                        method: GetPeerInfo,
+                        params: [],
+                    },
+                )
                 .await?
                 .into_result()?
                 .into_iter()
@@ -248,26 +252,31 @@ impl std::ops::DerefMut for RecyclableConnection {
     }
 }
 
-async fn fetch_block_from_self(state: &State, hash: BlockHash) -> Result<Option<Block>, RpcError> {
+async fn fetch_block_from_self(
+    state: &State,
+    auth: &HeaderValue,
+    hash: BlockHash,
+) -> Result<Result<Block, RpcError>, RpcError> {
     match state
         .rpc_client
-        .call(&RpcRequest {
-            id: None,
-            method: GetBlock,
-            params: GetBlockParams(hash, Some(0)),
-        })
+        .call(
+            auth,
+            &RpcRequest {
+                id: None,
+                method: GetBlock,
+                params: GetBlockParams(hash, Some(0)),
+            },
+        )
         .await?
         .into_result()
     {
-        Ok(b) => Ok(Some(
-            Block::consensus_decode(&mut std::io::Cursor::new(
-                b.as_left()
-                    .ok_or_else(|| anyhow::anyhow!("unexpected response for getblock"))?
-                    .as_ref(),
-            ))
-            .map_err(Error::from)?,
-        )),
-        Err(e) if e.code == MISC_ERROR_CODE && e.message == PRUNE_ERROR_MESSAGE => Ok(None),
+        Ok(b) => Ok(Ok(Block::consensus_decode(&mut std::io::Cursor::new(
+            b.as_left()
+                .ok_or_else(|| color_eyre::eyre::eyre!("unexpected response for getblock"))?
+                .as_ref(),
+        ))
+        .map_err(Error::from)?)),
+        Err(e) if e.code == MISC_ERROR_CODE && e.message == PRUNE_ERROR_MESSAGE => Ok(Err(e)),
         Err(e) => Err(e),
     }
 }
@@ -304,13 +313,15 @@ async fn fetch_block_from_peer<'a>(
                     let witness_check = b.check_witness_commitment();
                     return match (returned_hash == hash, merkle_check, witness_check) {
                         (true, true, true) => Ok((b, conn)),
-                        (true, true, false) => {
-                            Err(anyhow::anyhow!("Witness check failed for {:?}", hash))
-                        }
-                        (true, false, _) => {
-                            Err(anyhow::anyhow!("Merkle check failed for {:?}", hash))
-                        }
-                        (false, _, _) => Err(anyhow::anyhow!(
+                        (true, true, false) => Err(color_eyre::eyre::eyre!(
+                            "Witness check failed for {:?}",
+                            hash
+                        )),
+                        (true, false, _) => Err(color_eyre::eyre::eyre!(
+                            "Merkle check failed for {:?}",
+                            hash
+                        )),
+                        (false, _, _) => Err(color_eyre::eyre::eyre!(
                             "Expected block hash {:?}, got {:?}",
                             hash,
                             returned_hash
@@ -329,7 +340,7 @@ async fn fetch_block_from_peer<'a>(
                     })
                     .await??;
                 }
-                m => warn!(state.logger, "Invalid Message Received: {:?}", m),
+                m => tracing::warn!("Invalid Message Received: {:?}", m),
             }
         }
     })
@@ -365,7 +376,7 @@ async fn fetch_block_from_peers(
                     conn.recycle();
                     send.clone().try_send(block).unwrap_or_default();
                 }
-                Err(e) => warn!(state.logger, "Error fetching block from peer: {}", e),
+                Err(e) => tracing::warn!("Error fetching block from peer: {}", e),
             }
             futures::future::ready(())
         });
@@ -386,22 +397,19 @@ async fn fetch_block_from_peers(
 pub async fn fetch_block(
     state: Arc<State>,
     peers: Vec<PeerHandle>,
+    auth: &HeaderValue,
     hash: BlockHash,
-) -> Result<Option<Block>, RpcError> {
-    Ok(match fetch_block_from_self(&*state, hash).await? {
-        Some(block) => Some(block),
-        None => {
-            debug!(
-                state.logger,
-                "Block is pruned from Core, attempting fetch from peers.";
-                "block_hash" => %hash
-            );
+) -> Result<Block, RpcError> {
+    match fetch_block_from_self(&*state, auth, hash).await? {
+        Ok(block) => Ok(block),
+        Err(e) => {
+            tracing::debug!("Block {hash} is pruned from Core, attempting fetch from peers.");
             if let Some(block) = fetch_block_from_peers(state.clone(), peers, hash).await {
-                Some(block)
+                Ok(block)
             } else {
-                error!(state.logger, "Could not fetch block from peers."; "block_hash" => %hash);
-                None
+                tracing::error!("Could not fetch block {hash} from peers.");
+                Err(e)
             }
         }
-    })
+    }
 }

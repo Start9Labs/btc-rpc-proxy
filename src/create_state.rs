@@ -1,11 +1,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Error;
 use btc_rpc_proxy::{AuthSource, Peers, RpcClient, State, TorState};
+use color_eyre::eyre::Error;
 use slog::Drain;
-use tokio::sync::RwLock;
 use systemd_socket::SocketAddr;
+use tokio::sync::RwLock;
 
 #[allow(dead_code)]
 #[allow(unused_mut)]
@@ -30,11 +30,12 @@ pub fn create_state() -> Result<(State, SocketAddr), Error> {
         _ => Level::Trace,
     };
 
-    let decorator = slog_term::TermDecorator::new()
-        .stderr()
-        .build();
+    let decorator = slog_term::TermDecorator::new().stderr().build();
     let drain = slog_term::FullFormat::new(decorator).build().fuse();
-    let drain = slog_async::Async::new(drain).build().filter_level(log_level).fuse();
+    let drain = slog_async::Async::new(drain)
+        .build()
+        .filter_level(log_level)
+        .fuse();
     let logger = slog::Logger::root(drain, slog::o!());
 
     let auth = AuthSource::from_config(
@@ -49,7 +50,7 @@ pub fn create_state() -> Result<(State, SocketAddr), Error> {
     .parse()
     .map_err(|error: http::uri::InvalidUri| {
         let msg = "failed to parse bitcoin URI";
-        let new_error = anyhow::anyhow!("{}: {}", msg, error);
+        let new_error = color_eyre::eyre::eyre!("{}: {}", msg, error);
         slog::error!(logger, "{}", msg; "error" => #error);
         new_error
     })?;
@@ -66,35 +67,44 @@ pub fn create_state() -> Result<(State, SocketAddr), Error> {
     // for consistency
     let default_bind_port = 8331;
 
-    let bind_addr = match (config.bind_address, config.bind_port, config.bind_systemd_socket_name) {
+    let bind_addr = match (
+        config.bind_address,
+        config.bind_port,
+        config.bind_systemd_socket_name,
+    ) {
         (Some(addr), Some(port), None) => (addr, port).into(),
         (None, Some(port), None) => (default_bind_address, port).into(),
         (Some(addr), None, None) => (addr, default_bind_port).into(),
         (None, None, None) => (default_bind_address, default_bind_port).into(),
         (None, None, Some(socket_name)) => {
-            SocketAddr::from_systemd_name(socket_name)
-                .map_err(|error| {
-                    let msg = "failed to parse systemd socket name";
-                    let new_error = anyhow::anyhow!("{}: {}", msg, error);
-                    slog::error!(logger, "{}", msg; "error" => #error);
-                    new_error
-                })?
-        },
+            SocketAddr::from_systemd_name(socket_name).map_err(|error| {
+                let msg = "failed to parse systemd socket name";
+                let new_error = color_eyre::eyre::eyre!("{}: {}", msg, error);
+                slog::error!(logger, "{}", msg; "error" => #error);
+                new_error
+            })?
+        }
         _ => {
             let msg = "bind_systemd_socket_name can NOT be specified when bind_address or bind_port is specified";
             slog::error!(logger, "{}", msg);
-            anyhow::bail!("{}", msg)
+            color_eyre::eyre::bail!("{}", msg)
         }
     };
 
-    Ok((State {
-        rpc_client,
-        tor,
-        users: btc_rpc_proxy::users::input::map_default(config.user, config.default_fetch_blocks),
-        logger,
-        peer_timeout: Duration::from_secs(config.peer_timeout),
-        peers: RwLock::new(Arc::new(Peers::new())),
-        max_peer_age: Duration::from_secs(config.max_peer_age),
-        max_peer_concurrency: config.max_peer_concurrency,
-    }, bind_addr))
+    Ok((
+        State {
+            rpc_client,
+            tor,
+            users: btc_rpc_proxy::users::input::map_default(
+                config.user,
+                config.default_fetch_blocks,
+            ),
+            logger,
+            peer_timeout: Duration::from_secs(config.peer_timeout),
+            peers: RwLock::new(Arc::new(Peers::new())),
+            max_peer_age: Duration::from_secs(config.max_peer_age),
+            max_peer_concurrency: config.max_peer_concurrency,
+        },
+        bind_addr,
+    ))
 }

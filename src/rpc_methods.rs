@@ -1,4 +1,6 @@
+use bitcoin::consensus::Encodable;
 use bitcoin::hash_types::BlockHash;
+use color_eyre::eyre::Error;
 use linear_map::{set::LinearSet, LinearMap};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -86,7 +88,7 @@ pub struct GetBlockHeaderResult {
     pub height: usize,
     pub version: i32,
     pub version_hex: Option<HexBytes>,
-    pub merkleroot: bitcoin::TxMerkleNode,
+    pub merkleroot: bitcoin::hash_types::TxMerkleNode,
     pub time: usize,
     pub mediantime: Option<usize>,
     pub nonce: u32,
@@ -106,7 +108,200 @@ pub struct GetBlockResult {
     pub size: usize,
     pub strippedsize: Option<usize>,
     pub weight: usize,
-    pub tx: Vec<bitcoin::Txid>,
+    pub tx: Either<Vec<bitcoin::Txid>, Vec<GetRawTransactionResult>>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetRawTransactionResult {
+    #[serde(rename = "in_active_chain")]
+    pub in_active_chain: Option<bool>,
+    pub hex: HexBytes,
+    pub txid: bitcoin::Txid,
+    pub hash: bitcoin::Wtxid,
+    pub size: usize,
+    pub vsize: usize,
+    pub version: i32,
+    pub locktime: u32,
+    pub vin: Vec<GetRawTransactionResultVin>,
+    pub vout: Vec<GetRawTransactionResultVout>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blockhash: Option<bitcoin::BlockHash>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmations: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocktime: Option<usize>,
+}
+impl GetRawTransactionResult {
+    pub fn from_raw(
+        tx: bitcoin::Transaction,
+        header: &GetBlockHeaderResult,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            in_active_chain: None,
+            hex: HexBytes({
+                let mut bytes = Vec::new();
+                tx.consensus_encode(&mut bytes)?;
+                bytes.into()
+            }),
+            txid: tx.txid(),
+            hash: tx.wtxid(),
+            size: tx.size(),
+            vsize: tx.vsize(),
+            version: tx.version,
+            locktime: tx.lock_time.to_consensus_u32(),
+            vin: if tx.is_coin_base() {
+                tx.input
+                    .into_iter()
+                    .map(|vin| GetRawTransactionResultVin {
+                        sequence: vin.sequence.to_consensus_u32(),
+                        coinbase: Some(HexBytes(vin.script_sig.as_bytes().to_vec().into())),
+                        txid: None,
+                        vout: None,
+                        script_sig: None,
+                        txinwitness: Some(
+                            vin.witness
+                                .to_vec()
+                                .into_iter()
+                                .map(|v| HexBytes(v.into()))
+                                .collect(),
+                        ),
+                    })
+                    .collect()
+            } else {
+                tx.input
+                    .into_iter()
+                    .map(|vin| GetRawTransactionResultVin {
+                        sequence: vin.sequence.to_consensus_u32(),
+                        coinbase: None,
+                        txid: Some(vin.previous_output.txid),
+                        vout: Some(vin.previous_output.vout),
+                        script_sig: Some(GetRawTransactionResultVinScriptSig {
+                            asm: vin.script_sig.to_asm_string(),
+                            hex: HexBytes(vin.script_sig.to_bytes().into()),
+                        }),
+                        txinwitness: Some(
+                            vin.witness
+                                .to_vec()
+                                .into_iter()
+                                .map(|v| HexBytes(v.into()))
+                                .collect(),
+                        ),
+                    })
+                    .collect()
+            },
+            vout: tx
+                .output
+                .into_iter()
+                .enumerate()
+                .map(|(n, vout)| GetRawTransactionResultVout {
+                    value: bitcoin::Amount::from_sat(vout.value),
+                    n,
+                    script_pub_key: GetRawTransactionResultVoutScriptPubKey {
+                        asm: vout.script_pubkey.to_asm_string(),
+                        hex: HexBytes(vout.script_pubkey.as_bytes().to_vec().into()),
+                        type_: if vout.script_pubkey.is_op_return() {
+                            Some(ScriptPubkeyType::NullData)
+                        } else if vout.script_pubkey.is_p2pk() {
+                            Some(ScriptPubkeyType::Pubkey)
+                        } else if vout.script_pubkey.is_p2pkh() {
+                            Some(ScriptPubkeyType::PubkeyHash)
+                        } else if vout.script_pubkey.is_p2sh() {
+                            Some(ScriptPubkeyType::ScriptHash)
+                        } else if vout.script_pubkey.is_v0_p2wpkh() {
+                            Some(ScriptPubkeyType::Witness_v0_KeyHash)
+                        } else if vout.script_pubkey.is_v0_p2wsh() {
+                            Some(ScriptPubkeyType::Witness_v0_ScriptHash)
+                        } else if vout.script_pubkey.is_v1_p2tr() {
+                            Some(ScriptPubkeyType::Witness_v1_Taproot)
+                        } else if vout.script_pubkey.is_witness_program() {
+                            Some(ScriptPubkeyType::Witness_Unknown)
+                        } else {
+                            Some(ScriptPubkeyType::Nonstandard)
+                        },
+                        address: bitcoin::Address::from_script(
+                            vout.script_pubkey.as_script(),
+                            bitcoin::Network::Bitcoin,
+                        )
+                        .ok()
+                        .map(|addr| bitcoin::Address::new(addr.network, addr.payload)),
+                    },
+                })
+                .collect(),
+            blockhash: Some(header.hash.clone()),
+            confirmations: Some(header.confirmations),
+            time: Some(header.time),
+            blocktime: Some(header.time),
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetRawTransactionResultVin {
+    pub sequence: u32,
+    /// The raw scriptSig in case of a coinbase tx.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coinbase: Option<HexBytes>,
+    /// Not provided for coinbase txs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub txid: Option<bitcoin::Txid>,
+    /// Not provided for coinbase txs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vout: Option<u32>,
+    /// The scriptSig in case of a non-coinbase tx.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub script_sig: Option<GetRawTransactionResultVinScriptSig>,
+    /// Not provided for coinbase txs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub txinwitness: Option<Vec<HexBytes>>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetRawTransactionResultVinScriptSig {
+    pub asm: String,
+    pub hex: HexBytes,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetRawTransactionResultVout {
+    #[serde(with = "bitcoin::amount::serde::as_btc")]
+    pub value: bitcoin::Amount,
+    pub n: usize,
+    pub script_pub_key: GetRawTransactionResultVoutScriptPubKey,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetRawTransactionResultVoutScriptPubKey {
+    pub asm: String,
+    pub hex: HexBytes,
+    #[serde(rename = "type")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_: Option<ScriptPubkeyType>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<bitcoin::Address<bitcoin::address::NetworkUnchecked>>,
+}
+
+#[allow(non_camel_case_types)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScriptPubkeyType {
+    Nonstandard,
+    Pubkey,
+    PubkeyHash,
+    ScriptHash,
+    MultiSig,
+    NullData,
+    Witness_v0_KeyHash,
+    Witness_v0_ScriptHash,
+    Witness_v1_Taproot,
+    Witness_Unknown,
 }
 
 #[derive(Debug)]
