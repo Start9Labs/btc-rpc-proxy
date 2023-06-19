@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::{convert::Infallible, net::SocketAddr};
 
 use color_eyre::eyre::Error;
-use futures::FutureExt;
 use hyper::{
     server::Server,
     service::{make_service_fn, service_fn},
@@ -21,12 +20,21 @@ use crate::proxy::proxy_request;
 pub use crate::state::{State, TorState};
 
 pub async fn main(state: Arc<State>, bind_addr: SocketAddr) -> Result<(), Error> {
-    let state_local = state.clone();
     let make_service = make_service_fn(move |_conn| {
-        let state_local_local = state_local.clone();
+        let state = state.clone();
         async move {
             Ok::<_, Infallible>(service_fn(move |req| {
-                proxy_request(state_local_local.clone(), req).boxed()
+                let state = state.clone();
+                async move {
+                    match proxy_request(state, req).await {
+                        Err(e) => {
+                            tracing::error!("{e}");
+                            tracing::debug!("{e:?}");
+                            Err(e)
+                        }
+                        Ok(a) => Ok(a),
+                    }
+                }
             }))
         }
     });
