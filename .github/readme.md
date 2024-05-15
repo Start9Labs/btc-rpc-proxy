@@ -18,7 +18,6 @@ Finer-grained permission management for bitcoind.
 Via Docker Compose:
 
 ```yaml
-version: "3"
 services:
   rpc-proxy:
     container_name: rpc-proxy
