@@ -1,7 +1,7 @@
 name: ghcr ci
 
 env:
-  IMAGE_NAME: 'btc-rpc-proxy'
+  IMAGE_NAME: "btc-rpc-proxy"
 
 on:
   push:
@@ -10,30 +10,30 @@ on:
     pull_request: []
 
 jobs:
-      push-image:
-        runs-on: ubuntu-latest
-        permissions:
-          packages: write
-          contents: read
-        steps:
-          - uses: actions/checkout@v4
-          - name: Set up Docker Buildx
-            uses: docker/setup-buildx-action@v2
-          - name: Build image
-            run: docker buildx build . --tag $IMAGE_NAME --label "runnumber=${GITHUB_RUN_ID}" --load
-          - name: Log in to registry
-            run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+  push-image:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      - name: Build image
+        run: docker buildx build . --platform linux/amd64, linux/arm64 --tag $IMAGE_NAME --label "runnumber=${GITHUB_RUN_ID}" --load
+      - name: Log in to registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-          - name: Push image
-            run: |
-              IMAGE_ID=ghcr.io/${{ github.repository_owner }}/$IMAGE_NAME
-              IMAGE_ID=$(echo $IMAGE_ID | tr '[A-Z]' '[a-z]')
-              VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,')
-              [[ "${{ github.ref }}" == "refs/tags/"* ]] && VERSION=$(echo $VERSION | sed -e 's/^v//')
-              [ "$VERSION" == "master" ] && VERSION=latest
-              echo IMAGE_ID=$IMAGE_ID
-              echo VERSION=$VERSION
-              docker tag $IMAGE_NAME $IMAGE_ID:$VERSION
-              docker push $IMAGE_ID:$VERSION
-          - name: Clean up Docker images
-            run: docker image prune -f
+      - name: Push image
+        run: |
+          IMAGE_ID=ghcr.io/${{ github.repository_owner }}/$IMAGE_NAME
+          IMAGE_ID=$(echo $IMAGE_ID | tr '[A-Z]' '[a-z]')
+          VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,')
+          [[ "${{ github.ref }}" == "refs/tags/"* ]] && VERSION=$(echo $VERSION | sed -e 's/^v//')
+          [ "$VERSION" == "master" ] && VERSION=latest
+          echo IMAGE_ID=$IMAGE_ID
+          echo VERSION=$VERSION
+          docker tag $IMAGE_NAME $IMAGE_ID:$VERSION
+          docker push $IMAGE_ID:$VERSION
+      - name: Clean up Docker images
+        run: docker image prune -f
