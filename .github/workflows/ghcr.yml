@@ -31,11 +31,9 @@ jobs:
         env:
           IMAGE_ID: ${{ env.IMAGE_ID }}
           VERSION: ${{ env.VERSION }}
-      - name: Build image
-        run: docker buildx build . --platform linux/amd64,linux/arm64 --tag $IMAGE_ID --label "runnumber=${GITHUB_RUN_ID}" --push
       - name: Log in to registry
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-      - name: Push image
-        run: docker push $IMAGE_ID:$VERSION
+      - name: Build and push image
+        run: docker buildx build . --platform linux/amd64,linux/arm64 --tag $IMAGE_ID --label "runnumber=${GITHUB_RUN_ID}" --push
       - name: Clean up Docker images
         run: docker image prune -f
