@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::Error;
 use btc_rpc_proxy::users::Password;
-use btc_rpc_proxy::{AuthSource, Peers, RpcClient, State, TorState, User};
+use btc_rpc_proxy::{AuthSource, Peers, RpcClient, State, TorState};
 use slog::Drain;
 use systemd_socket::SocketAddr;
 use tokio::sync::RwLock;
@@ -103,6 +103,21 @@ pub fn create_state() -> Result<(State, SocketAddr), Error> {
                     btc_rpc_proxy::users::input::User {
                         allowed_calls: None,
                         password: Password::Hash(salt.to_owned(), hex::decode(hash)?),
+                        fetch_blocks: None,
+                        override_wallet: None,
+                    },
+                );
+            }
+        }
+    }
+    if let Some(conf) = config.passthrough_rpccookie {
+        for line in std::fs::read_to_string(conf)?.lines() {
+            if let Some((uname, pass)) = line.trim().split_once(":") {
+                users.insert(
+                    uname.into(),
+                    btc_rpc_proxy::users::input::User {
+                        allowed_calls: None,
+                        password: Password::Cleartext(pass.to_owned()),
                         fetch_blocks: None,
                         override_wallet: None,
                     },

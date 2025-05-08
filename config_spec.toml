@@ -65,6 +65,12 @@ optional = true
 doc = "Passthrough rpcauth users defined in the provided bitcoin.conf"
 
 [[param]]
+name = "passthrough_rpccookie"
+type = "::std::path::PathBuf"
+optional = true
+doc = "Passthrough .cookie auth"
+
+[[param]]
 name = "user"
 type = "std::collections::HashMap<String, btc_rpc_proxy::users::input::User>"
 merge_fn = "std::iter::Extend::extend"
