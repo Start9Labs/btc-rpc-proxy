@@ -121,6 +121,7 @@ pub struct GetRawTransactionResult {
     pub hash: bitcoin::Wtxid,
     pub size: usize,
     pub vsize: usize,
+    pub weight: bitcoin::Weight,
     pub version: i32,
     pub locktime: u32,
     pub vin: Vec<GetRawTransactionResultVin>,
@@ -150,6 +151,7 @@ impl GetRawTransactionResult {
             hash: tx.wtxid(),
             size: tx.size(),
             vsize: tx.vsize(),
+            weight: tx.weight(),
             version: tx.version,
             locktime: tx.lock_time.to_consensus_u32(),
             vin: if tx.is_coin_base() {
