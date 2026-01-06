@@ -34,6 +34,6 @@ jobs:
       - name: Log in to registry
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
       - name: Build and push image
-        run: docker buildx build . --platform linux/amd64,linux/arm64 --tag $IMAGE_ID --label "runnumber=${GITHUB_RUN_ID}" --push
+        run: docker buildx build . --platform linux/amd64,linux/arm64,linux/riscv64 --tag $IMAGE_ID --label "runnumber=${GITHUB_RUN_ID}" --push
       - name: Clean up Docker images
         run: docker image prune -f

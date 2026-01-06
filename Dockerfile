@@ -1,19 +1,24 @@
-# Builder
-FROM rust:1.85 AS builder
+# syntax=docker/dockerfile:1
 
-RUN apt-get update && apt-get install
+# Builder - runs on native platform for fast cross-compilation
+FROM --platform=$BUILDPLATFORM rust:1.85 AS builder
+
+RUN apt-get update && apt-get install -y \
+    gcc-aarch64-linux-gnu \
+    gcc-riscv64-linux-gnu \
+    libc6-dev-arm64-cross \
+    libc6-dev-riscv64-cross
 
 WORKDIR /app
-
 COPY . .
 
-RUN cargo build --release
+ARG TARGETARCH
+RUN ./scripts/cross-build.sh
 
-# Final
-FROM debian:bookworm-slim
+# Final - runs on target platform
+FROM debian:trixie-slim
 
-COPY --from=builder /app/target/release/btc_rpc_proxy /usr/bin/btc_rpc_proxy
-
+COPY --from=builder /app/btc_rpc_proxy /usr/bin/btc_rpc_proxy
 RUN chmod +x /usr/bin/btc_rpc_proxy
 
 SHELL [ "/bin/bash", "-c" ]
