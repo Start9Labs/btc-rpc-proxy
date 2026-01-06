@@ -1,19 +1,19 @@
-# Builder
-FROM rust:1.85 AS builder
+# syntax=docker/dockerfile:1
 
-RUN apt-get update && apt-get install
+# Builder - runs on native platform using cargo-zigbuild for cross-compilation
+FROM --platform=$BUILDPLATFORM start9/cargo-zigbuild AS builder
 
 WORKDIR /app
-
 COPY . .
 
-RUN cargo build --release
+ARG TARGETARCH
+RUN ./scripts/cross-build.sh && \
+    ln -s /app/target/$(cat /tmp/rust_target)/release/btc_rpc_proxy /app/btc_rpc_proxy
 
-# Final
-FROM debian:bookworm-slim
+# Final - runs on target platform
+FROM debian:trixie-slim
 
-COPY --from=builder /app/target/release/btc_rpc_proxy /usr/bin/btc_rpc_proxy
-
+COPY --from=builder /app/btc_rpc_proxy /usr/bin/btc_rpc_proxy
 RUN chmod +x /usr/bin/btc_rpc_proxy
 
 SHELL [ "/bin/bash", "-c" ]
