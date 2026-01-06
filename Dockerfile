@@ -1,19 +1,14 @@
 # syntax=docker/dockerfile:1
 
-# Builder - runs on native platform for fast cross-compilation
-FROM --platform=$BUILDPLATFORM rust:1.85 AS builder
-
-RUN apt-get update && apt-get install -y \
-    gcc-aarch64-linux-gnu \
-    gcc-riscv64-linux-gnu \
-    libc6-dev-arm64-cross \
-    libc6-dev-riscv64-cross
+# Builder - runs on native platform using cargo-zigbuild for cross-compilation
+FROM --platform=$BUILDPLATFORM start9/cargo-zigbuild AS builder
 
 WORKDIR /app
 COPY . .
 
 ARG TARGETARCH
-RUN ./scripts/cross-build.sh
+RUN ./scripts/cross-build.sh && \
+    ln -s /app/target/$(cat /tmp/rust_target)/release/btc_rpc_proxy /app/btc_rpc_proxy
 
 # Final - runs on target platform
 FROM debian:trixie-slim
