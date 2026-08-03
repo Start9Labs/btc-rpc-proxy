@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Error;
-use bitcoin::consensus::Encodable;
 use hyper::{header::HeaderValue, StatusCode};
 use serde_json::Value;
 
@@ -11,7 +10,7 @@ use crate::client::{
     METHOD_NOT_ALLOWED_ERROR_CODE, METHOD_NOT_ALLOWED_ERROR_MESSAGE, MISC_ERROR_CODE,
     PRUNE_ERROR_MESSAGE,
 };
-use crate::fetch_blocks::fetch_block;
+use crate::fetch_blocks::{fetch_block, fetch_block_raw};
 use crate::rpc_methods::{GetBlock, GetBlockHeader, GetBlockHeaderParams, GetBlockResult};
 use crate::state::State;
 
@@ -230,25 +229,18 @@ impl User {
                 {
                     match params.get(1).unwrap_or(&1_u64.into()) {
                         Value::Number(ref n) if n.as_u64() == Some(0) => {
-                            match fetch_block(
+                            match fetch_block_raw(
                                 state.clone(),
                                 state.get_peers().await?,
                                 serde_json::from_value(params[0].clone()).map_err(Error::from)?,
                             )
                             .await
                             {
-                                Ok(Some(block)) => {
-                                    let mut block_data = Vec::new();
-                                    block
-                                        .consensus_encode(&mut block_data)
-                                        .map_err(Error::from)?;
-                                    let block_data = hex::encode(&block_data);
-                                    Ok(Some(RpcResponse {
-                                        id: req.id.clone(),
-                                        result: Some(Value::String(block_data)),
-                                        error: None,
-                                    }))
-                                }
+                                Ok(Some(block)) => Ok(Some(RpcResponse {
+                                    id: req.id.clone(),
+                                    result: Some(Value::String(hex::encode(&block))),
+                                    error: None,
+                                })),
                                 Ok(None) => Ok(Some(RpcResponse {
                                     id: req.id.clone(),
                                     result: None,

@@ -7,6 +7,12 @@ use serde::{
 #[derive(Debug)]
 pub struct HexBytes(Bytes);
 
+impl HexBytes {
+    pub fn into_inner(self) -> Bytes {
+        self.0
+    }
+}
+
 impl std::ops::Deref for HexBytes {
     type Target = Bytes;
 

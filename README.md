@@ -25,6 +25,14 @@ This means that you can run multiple services against your _pruned_ Bitcoin node
 
 A tradeoff to the proxy is speed and bandwidth. Every time the proxy needs to fetch a block not retained by your pruned node, it must reach out over the P2P network, consuming both Internet bandwidth and time.
 
+Fetching is a per-user permission. Set `fetch_blocks = true` on a `[user.*]`, or turn on the global `default_fetch_blocks` switch to grant it to every user that does not say otherwise — including the users derived from `passthrough_rpcauth` and `passthrough_rpccookie`, which carry no setting of their own and so are governed entirely by that switch.
+
+Two options tune what a fetch costs:
+
+* `max_peer_concurrency` caps how many peers are asked for the same block at once. The first valid answer wins, so leaving it unset asks _every_ eligible peer and pulls the block several times over.
+
+Peers are reached over clearnet, or through `tor_proxy` for `.onion` addresses. Reaching `.b32.i2p` peers additionally needs `i2p_proxy` pointed at an I2P SOCKSv5 proxy (i2pd's `socksproxy`, for instance); without one those peers cannot be used, as Tor cannot resolve them.
+
 ## Usage
 
 For security and performance reasons this application is written in Rust. Thus, you need a recent Rust compiler to compile it.
@@ -49,6 +57,7 @@ Especially in case of packaged software.
 ## Limitations
 
 * It uses `serde_json`, which allocates during deserialization (`Value`). Expect a bit lower performance than without proxy.
+* Only `getblock` verbosity 0 and 1 are intercepted. Verbosity 2 is forwarded to your node, so it still fails for a pruned block — and could not be answered faithfully anyway, since the per-input `fee` fields need undo data a pruned node no longer has.
 * Logging can't be configured yet.
 * No support for changing UID.
 * No support for Unix sockets.
