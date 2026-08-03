@@ -130,6 +130,7 @@ pub fn create_state() -> Result<(State, SocketAddr), Error> {
         State {
             rpc_client,
             tor,
+            i2p_proxy: config.i2p_proxy,
             users: btc_rpc_proxy::users::input::map_default(users, config.default_fetch_blocks),
             logger,
             peer_timeout: Duration::from_secs(config.peer_timeout),

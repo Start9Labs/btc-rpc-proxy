@@ -102,6 +102,12 @@ optional = true
 doc = "The IP address and port of the Tor SOCKSv5 proxy to use for peer connections"
 
 [[param]]
+name = "i2p_proxy"
+type = "std::net::SocketAddr"
+optional = true
+doc = "The IP address and port of an I2P SOCKSv5 proxy, used to reach .i2p peers. Without it those peers are unreachable, as Tor cannot resolve them."
+
+[[param]]
 name = "tor_only"
 type = "bool"
 default = "false"

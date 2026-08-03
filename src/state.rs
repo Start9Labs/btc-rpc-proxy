@@ -20,6 +20,7 @@ pub struct TorState {
 pub struct State {
     pub rpc_client: RpcClient,
     pub tor: Option<TorState>,
+    pub i2p_proxy: Option<SocketAddr>,
     pub users: Users,
     pub logger: Logger,
     pub peer_timeout: Duration,

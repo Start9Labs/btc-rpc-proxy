@@ -18,6 +18,7 @@ use bitcoin::{
     Block,
 };
 use futures::FutureExt;
+use hyper::body::Bytes;
 use socks::Socks5Stream;
 
 use crate::client::{
@@ -107,46 +108,46 @@ pub enum PeerUpdateError {
 }
 
 pub enum BitcoinPeerConnection {
-    ClearNet(TcpStream),
-    Tor(Socks5Stream),
+    Direct(TcpStream),
+    Proxied(Socks5Stream),
 }
 impl Read for BitcoinPeerConnection {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
-            BitcoinPeerConnection::ClearNet(a) => a.read(buf),
-            BitcoinPeerConnection::Tor(a) => a.read(buf),
+            BitcoinPeerConnection::Direct(a) => a.read(buf),
+            BitcoinPeerConnection::Proxied(a) => a.read(buf),
         }
     }
 }
 impl Write for BitcoinPeerConnection {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
-            BitcoinPeerConnection::ClearNet(a) => a.write(buf),
-            BitcoinPeerConnection::Tor(a) => a.write(buf),
+            BitcoinPeerConnection::Direct(a) => a.write(buf),
+            BitcoinPeerConnection::Proxied(a) => a.write(buf),
         }
     }
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
-            BitcoinPeerConnection::ClearNet(a) => a.flush(),
-            BitcoinPeerConnection::Tor(a) => a.flush(),
+            BitcoinPeerConnection::Direct(a) => a.flush(),
+            BitcoinPeerConnection::Proxied(a) => a.flush(),
         }
     }
     fn write_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> std::io::Result<usize> {
         match self {
-            BitcoinPeerConnection::ClearNet(a) => a.write_vectored(bufs),
-            BitcoinPeerConnection::Tor(a) => a.write_vectored(bufs),
+            BitcoinPeerConnection::Direct(a) => a.write_vectored(bufs),
+            BitcoinPeerConnection::Proxied(a) => a.write_vectored(bufs),
         }
     }
     fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
         match self {
-            BitcoinPeerConnection::ClearNet(a) => a.write_all(buf),
-            BitcoinPeerConnection::Tor(a) => a.write_all(buf),
+            BitcoinPeerConnection::Direct(a) => a.write_all(buf),
+            BitcoinPeerConnection::Proxied(a) => a.write_all(buf),
         }
     }
     fn write_fmt(&mut self, fmt: std::fmt::Arguments<'_>) -> std::io::Result<()> {
         match self {
-            BitcoinPeerConnection::ClearNet(a) => a.write_fmt(fmt),
-            BitcoinPeerConnection::Tor(a) => a.write_fmt(fmt),
+            BitcoinPeerConnection::Direct(a) => a.write_fmt(fmt),
+            BitcoinPeerConnection::Proxied(a) => a.write_fmt(fmt),
         }
     }
 }
@@ -158,13 +159,22 @@ impl BitcoinPeerConnection {
         tokio::time::timeout(
             state.peer_timeout,
             tokio::task::spawn_blocking(move || {
-                let mut stream = match &state.tor {
-                    Some(TorState { only, proxy })
-                        if *only || addr.split(":").next().unwrap().ends_with(".onion") =>
-                    {
-                        BitcoinPeerConnection::Tor(Socks5Stream::connect(proxy, &**addr)?)
+                // bitcoind reports i2p peers as `<base32>.b32.i2p:0`, which is
+                // neither routable nor resolvable outside i2p, so those need
+                // their own SOCKS proxy — Tor's cannot reach them.
+                let host = addr.rsplit_once(':').map_or(&**addr, |(host, _)| host);
+                let mut stream = if host.ends_with(".i2p") {
+                    let proxy = state.i2p_proxy.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("no i2p proxy configured, cannot reach {}", addr)
+                    })?;
+                    BitcoinPeerConnection::Proxied(Socks5Stream::connect(proxy, &**addr)?)
+                } else {
+                    match &state.tor {
+                        Some(TorState { only, proxy }) if *only || host.ends_with(".onion") => {
+                            BitcoinPeerConnection::Proxied(Socks5Stream::connect(proxy, &**addr)?)
+                        }
+                        _ => BitcoinPeerConnection::Direct(TcpStream::connect(&*addr)?),
                     }
-                    _ => BitcoinPeerConnection::ClearNet(TcpStream::connect(&*addr)?),
                 };
                 VERSION_MESSAGE().consensus_encode(&mut stream)?;
                 stream.flush()?;
@@ -248,7 +258,8 @@ impl std::ops::DerefMut for RecyclableConnection {
     }
 }
 
-async fn fetch_block_from_self(state: &State, hash: BlockHash) -> Result<Option<Block>, RpcError> {
+/// The block as bitcoind serialized it, or `None` if bitcoind has pruned it.
+async fn fetch_block_from_self(state: &State, hash: BlockHash) -> Result<Option<Bytes>, RpcError> {
     match state
         .rpc_client
         .call(&RpcRequest {
@@ -260,12 +271,9 @@ async fn fetch_block_from_self(state: &State, hash: BlockHash) -> Result<Option<
         .into_result()
     {
         Ok(b) => Ok(Some(
-            Block::consensus_decode(&mut std::io::Cursor::new(
-                b.as_left()
-                    .ok_or_else(|| anyhow::anyhow!("unexpected response for getblock"))?
-                    .as_ref(),
-            ))
-            .map_err(Error::from)?,
+            b.into_left()
+                .ok_or_else(|| anyhow::anyhow!("unexpected response for getblock"))?
+                .into_inner(),
         )),
         Err(e) if e.code == MISC_ERROR_CODE && e.message == PRUNE_ERROR_MESSAGE => Ok(None),
         Err(e) => Err(e),
@@ -383,25 +391,46 @@ async fn fetch_block_from_peers(
     b
 }
 
+/// The consensus-serialized block, from the local node if it still has it and
+/// from peers otherwise. Callers wanting `getblock` verbosity 0 use this
+/// directly and never pay to parse the block.
+pub async fn fetch_block_raw(
+    state: Arc<State>,
+    peers: Vec<PeerHandle>,
+    hash: BlockHash,
+) -> Result<Option<Bytes>, RpcError> {
+    if let Some(block) = fetch_block_from_self(&*state, hash).await? {
+        return Ok(Some(block));
+    }
+    debug!(
+        state.logger,
+        "Block is pruned from Core, attempting fetch from peers.";
+        "block_hash" => %hash
+    );
+    let block = match fetch_block_from_peers(state.clone(), peers, hash).await {
+        Some(block) => block,
+        None => {
+            error!(state.logger, "Could not fetch block from peers."; "block_hash" => %hash);
+            return Ok(None);
+        }
+    };
+    let mut serialized = Vec::new();
+    block
+        .consensus_encode(&mut serialized)
+        .map_err(Error::from)?;
+    Ok(Some(Bytes::from(serialized)))
+}
+
 pub async fn fetch_block(
     state: Arc<State>,
     peers: Vec<PeerHandle>,
     hash: BlockHash,
 ) -> Result<Option<Block>, RpcError> {
-    Ok(match fetch_block_from_self(&*state, hash).await? {
-        Some(block) => Some(block),
-        None => {
-            debug!(
-                state.logger,
-                "Block is pruned from Core, attempting fetch from peers.";
-                "block_hash" => %hash
-            );
-            if let Some(block) = fetch_block_from_peers(state.clone(), peers, hash).await {
-                Some(block)
-            } else {
-                error!(state.logger, "Could not fetch block from peers."; "block_hash" => %hash);
-                None
-            }
-        }
+    Ok(match fetch_block_raw(state, peers, hash).await? {
+        Some(block) => Some(
+            Block::consensus_decode(&mut std::io::Cursor::new(block.as_ref()))
+                .map_err(Error::from)?,
+        ),
+        None => None,
     })
 }
