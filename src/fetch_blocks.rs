@@ -396,7 +396,6 @@ async fn fetch_block_from_peers(
 /// directly and never pay to parse the block.
 pub async fn fetch_block_raw(
     state: Arc<State>,
-    peers: Vec<PeerHandle>,
     hash: BlockHash,
 ) -> Result<Option<Bytes>, RpcError> {
     if let Some(block) = fetch_block_from_self(&*state, hash).await? {
@@ -407,6 +406,9 @@ pub async fn fetch_block_raw(
         "Block is pruned from Core, attempting fetch from peers.";
         "block_hash" => %hash
     );
+    // Resolved here rather than by the caller so that a failure to enumerate
+    // peers can only ever affect blocks Core no longer has.
+    let peers = state.clone().get_peers().await?;
     let block = match fetch_block_from_peers(state.clone(), peers, hash).await {
         Some(block) => block,
         None => {
@@ -421,12 +423,8 @@ pub async fn fetch_block_raw(
     Ok(Some(Bytes::from(serialized)))
 }
 
-pub async fn fetch_block(
-    state: Arc<State>,
-    peers: Vec<PeerHandle>,
-    hash: BlockHash,
-) -> Result<Option<Block>, RpcError> {
-    Ok(match fetch_block_raw(state, peers, hash).await? {
+pub async fn fetch_block(state: Arc<State>, hash: BlockHash) -> Result<Option<Block>, RpcError> {
+    Ok(match fetch_block_raw(state, hash).await? {
         Some(block) => Some(
             Block::consensus_decode(&mut std::io::Cursor::new(block.as_ref()))
                 .map_err(Error::from)?,

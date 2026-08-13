@@ -109,36 +109,19 @@ pub struct GetBlockResult {
 #[derive(Debug)]
 pub struct GetPeerInfo;
 
-// https://docs.rs/bitcoincore-rpc-json/0.12.0/bitcoincore_rpc_json/struct.GetPeerInfoResult.html
+/// Only the fields `Peers::updated` selects on. Every other key Core emits is
+/// left to serde to ignore: naming one here makes it mandatory, and Core drops
+/// or conditionalizes keys between releases — `startingheight` went behind
+/// `-deprecatedrpc` in 31.0, and `addrbind` is emitted only for a valid bind
+/// address.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct PeerInfo {
-    /// Peer index
-    pub id: u64,
     /// The IP address and port of the peer
     pub addr: String,
-    /// Bind address of the connection to the peer
-    pub addrbind: String,
-    /// Local address as reported by the peer
-    pub addrlocal: Option<String>,
-    /// The services offered
-    // TODO: use a type for services
-    pub services: String,
     /// The services offered
     pub servicesnames: LinearSet<String>,
-    /// The peer version, such as 70001
-    pub version: u64,
-    /// The string version
-    pub subver: String,
     /// Inbound (true) or Outbound (false)
     pub inbound: bool,
-    /// The starting height (block) of the peer
-    pub startingheight: i64,
-    /// The last header we have in common with this peer
-    pub synced_headers: i64,
-    /// The last block we have in common with this peer
-    pub synced_blocks: i64,
-    /// The heights of blocks we're currently asking from this peer
-    pub inflight: Vec<u64>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -312,5 +295,75 @@ impl<'de> Deserialize<'de> for GetBlockchainInfo {
                 &Self.as_str(),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PeerInfo;
+
+    /// One `getpeerinfo` entry exactly as Bitcoin Core v31.1 emits it for an
+    /// outbound clearnet peer. Core 31.0 put `startingheight` behind
+    /// `-deprecatedrpc=startingheight`; naming it in `PeerInfo` made every
+    /// peer-list refresh fail, which took `getblock` down with it.
+    const CORE_31_PEER: &str = r#"{
+      "id": 7,
+      "addr": "203.0.113.9:8333",
+      "addrbind": "10.0.3.5:44212",
+      "network": "ipv4",
+      "services": "0000000000000409",
+      "servicesnames": ["NETWORK", "WITNESS", "NETWORK_LIMITED"],
+      "relaytxes": true,
+      "last_inv_sequence": 0,
+      "inv_to_send": 0,
+      "lastsend": 1755096000,
+      "lastrecv": 1755096001,
+      "last_transaction": 1755095990,
+      "last_block": 1755095900,
+      "bytessent": 123456,
+      "bytesrecv": 654321,
+      "conntime": 1755090000,
+      "timeoffset": 0,
+      "pingtime": 0.041,
+      "minping": 0.039,
+      "version": 70016,
+      "subver": "/Satoshi:31.1.0/",
+      "inbound": false,
+      "bip152_hb_to": false,
+      "bip152_hb_from": false,
+      "presynced_headers": -1,
+      "synced_headers": 962297,
+      "synced_blocks": 962297,
+      "inflight": [],
+      "addr_relay_enabled": true,
+      "addr_processed": 100,
+      "addr_rate_limited": 0,
+      "permissions": [],
+      "minfeefilter": 0.00001000,
+      "bytessent_per_msg": { "version": 126 },
+      "bytesrecv_per_msg": { "version": 126 },
+      "connection_type": "outbound-full-relay",
+      "transport_protocol_type": "v2",
+      "session_id": "abc"
+    }"#;
+
+    #[test]
+    fn parses_core_31_peer() {
+        let peer: PeerInfo = serde_json::from_str(CORE_31_PEER).expect("failed to parse");
+        assert_eq!(peer.addr, "203.0.113.9:8333");
+        assert!(!peer.inbound);
+        assert!(peer.servicesnames.contains("NETWORK"));
+    }
+
+    /// Core omits `addrbind` when the bind address is not valid, and drops or
+    /// conditionalizes other keys between releases. None of that may break the
+    /// peer list.
+    #[test]
+    fn tolerates_omitted_optional_keys() {
+        let stripped = CORE_31_PEER
+            .replace(r#""addrbind": "10.0.3.5:44212","#, "")
+            .replace(r#""pingtime": 0.041,"#, "")
+            .replace(r#""session_id": "abc""#, r#""session_id": """#);
+        serde_json::from_str::<PeerInfo>(&stripped).expect("failed to parse");
     }
 }
