@@ -231,7 +231,6 @@ impl User {
                         Value::Number(ref n) if n.as_u64() == Some(0) => {
                             match fetch_block_raw(
                                 state.clone(),
-                                state.get_peers().await?,
                                 serde_json::from_value(params[0].clone()).map_err(Error::from)?,
                             )
                             .await
@@ -269,14 +268,7 @@ impl User {
                                         .await?
                                         .into_result()
                                 },
-                                async {
-                                    fetch_block(
-                                        state.clone(),
-                                        state.clone().get_peers().await?,
-                                        hash,
-                                    )
-                                    .await
-                                }
+                                async { fetch_block(state.clone(), hash).await }
                             ) {
                                 Ok((header, Some(block))) => Ok(Some(RpcResponse {
                                     id: req.id.clone(),

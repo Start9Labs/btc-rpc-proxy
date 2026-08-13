@@ -187,7 +187,9 @@ impl From<Error> for RpcError {
     fn from(e: Error) -> Self {
         RpcError {
             code: MISC_ERROR_CODE,
-            message: format!("{}", e),
+            // Alternate form, so the source chain travels with the message —
+            // the outermost context alone rarely names what actually broke.
+            message: format!("{:#}", e),
             status: None,
         }
     }
