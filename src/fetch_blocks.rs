@@ -10,7 +10,7 @@ use bitcoin::{
     consensus::{Decodable, Encodable},
     hash_types::BlockHash,
     network::{
-        constants::{Network::Bitcoin, ServiceFlags},
+        constants::ServiceFlags,
         message::{NetworkMessage, RawNetworkMessage},
         message_blockdata::Inventory,
         message_network::VersionMessage,
@@ -27,31 +27,30 @@ use crate::client::{
 use crate::rpc_methods::{GetBlock, GetBlockParams, GetPeerInfo, PeerAddressError};
 use crate::state::{State, TorState};
 
-type VersionMessageProducer = Box<dyn Fn() -> RawNetworkMessage + Send + Sync>;
-
-lazy_static::lazy_static! {
-    static ref VER_ACK: RawNetworkMessage = RawNetworkMessage {
-        magic: Bitcoin.magic(),
+fn ver_ack(magic: u32) -> RawNetworkMessage {
+    RawNetworkMessage {
+        magic,
         payload: NetworkMessage::Verack,
-    };
-    static ref VERSION_MESSAGE: VersionMessageProducer = Box::new(|| {
-        use std::time::SystemTime;
-        RawNetworkMessage {
-            magic: Bitcoin.magic(),
-            payload: NetworkMessage::Version(VersionMessage::new(
-                ServiceFlags::NONE,
-                SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64,
-                bitcoin::network::Address::new(&([127, 0, 0, 1], 8332).into(), ServiceFlags::NONE),
-                bitcoin::network::Address::new(&([127, 0, 0, 1], 8332).into(), ServiceFlags::NONE),
-                0,
-                format!("BTC RPC Proxy v{}", env!("CARGO_PKG_VERSION")),
-                0,
-            )),
-        }
-    });
+    }
+}
+
+fn version_message(magic: u32) -> RawNetworkMessage {
+    use std::time::SystemTime;
+    RawNetworkMessage {
+        magic,
+        payload: NetworkMessage::Version(VersionMessage::new(
+            ServiceFlags::NONE,
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+            bitcoin::network::Address::new(&([127, 0, 0, 1], 8332).into(), ServiceFlags::NONE),
+            bitcoin::network::Address::new(&([127, 0, 0, 1], 8332).into(), ServiceFlags::NONE),
+            0,
+            format!("BTC RPC Proxy v{}", env!("CARGO_PKG_VERSION")),
+            0,
+        )),
+    }
 }
 
 #[derive(Debug)]
@@ -154,7 +153,7 @@ impl Write for BitcoinPeerConnection {
 impl BitcoinPeerConnection {
     pub async fn connect(state: Arc<State>, mut addr: Arc<String>) -> Result<Self, Error> {
         if !addr.contains(":") {
-            addr = Arc::new(format!("{}:8333", &*addr));
+            addr = Arc::new(format!("{}:{}", &*addr, state.default_peer_port));
         }
         tokio::time::timeout(
             state.peer_timeout,
@@ -176,13 +175,13 @@ impl BitcoinPeerConnection {
                         _ => BitcoinPeerConnection::Direct(TcpStream::connect(&*addr)?),
                     }
                 };
-                VERSION_MESSAGE().consensus_encode(&mut stream)?;
+                version_message(state.magic).consensus_encode(&mut stream)?;
                 stream.flush()?;
                 let _ =
                     bitcoin::network::message::RawNetworkMessage::consensus_decode(&mut stream)?; // version
                 let _ =
                     bitcoin::network::message::RawNetworkMessage::consensus_decode(&mut stream)?; // verack
-                VER_ACK.consensus_encode(&mut stream)?;
+                ver_ack(state.magic).consensus_encode(&mut stream)?;
                 stream.flush()?;
 
                 Ok(stream)
@@ -285,10 +284,11 @@ async fn fetch_block_from_peer<'a>(
     hash: BlockHash,
     mut conn: RecyclableConnection,
 ) -> Result<(Block, RecyclableConnection), Error> {
+    let magic = state.magic;
     tokio::time::timeout(state.peer_timeout, async move {
         conn = tokio::task::spawn_blocking(move || {
             RawNetworkMessage {
-                magic: Bitcoin.magic(),
+                magic,
                 payload: NetworkMessage::GetData(vec![Inventory::Block(hash)]),
             }
             .consensus_encode(&mut *conn)
@@ -328,7 +328,7 @@ async fn fetch_block_from_peer<'a>(
                 NetworkMessage::Ping(p) => {
                     conn = tokio::task::spawn_blocking(move || {
                         RawNetworkMessage {
-                            magic: Bitcoin.magic(),
+                            magic,
                             payload: NetworkMessage::Pong(p),
                         }
                         .consensus_encode(&mut *conn)
