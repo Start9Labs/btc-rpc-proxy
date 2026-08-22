@@ -289,7 +289,14 @@ async fn fetch_block_from_peer<'a>(
         conn = tokio::task::spawn_blocking(move || {
             RawNetworkMessage {
                 magic,
-                payload: NetworkMessage::GetData(vec![Inventory::Block(hash)]),
+                // WitnessBlock, not Block: MSG_BLOCK makes a segwit-aware peer
+                // serve the *stripped* serialization, so the block that comes
+                // back is missing the marker/flag and every witness stack. It
+                // still passes both checks below — the merkle root commits to
+                // txids, which stripping does not change, and
+                // check_witness_commitment() returns true vacuously once no
+                // transaction carries a witness — so the loss is silent.
+                payload: NetworkMessage::GetData(vec![Inventory::WitnessBlock(hash)]),
             }
             .consensus_encode(&mut *conn)
             .map_err(Error::from)
