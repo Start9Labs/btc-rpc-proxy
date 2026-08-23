@@ -151,6 +151,18 @@ impl Write for BitcoinPeerConnection {
     }
 }
 impl BitcoinPeerConnection {
+    /// Disable Nagle. `consensus_encode` writes a message to the socket in
+    /// several small pieces, and with Nagle on the kernel holds everything
+    /// after the first piece until the peer ACKs — which the peer's own
+    /// delayed-ACK timer defers by ~40ms. That turns every block fetch into a
+    /// fixed ~40ms stall regardless of how close the peer is.
+    fn set_nodelay(&self) -> std::io::Result<()> {
+        match self {
+            BitcoinPeerConnection::Direct(s) => s.set_nodelay(true),
+            BitcoinPeerConnection::Proxied(s) => s.get_ref().set_nodelay(true),
+        }
+    }
+
     pub async fn connect(state: Arc<State>, mut addr: Arc<String>) -> Result<Self, Error> {
         if !addr.contains(":") {
             addr = Arc::new(format!("{}:{}", &*addr, state.default_peer_port));
@@ -175,6 +187,9 @@ impl BitcoinPeerConnection {
                         _ => BitcoinPeerConnection::Direct(TcpStream::connect(&*addr)?),
                     }
                 };
+                if let Err(e) = stream.set_nodelay() {
+                    warn!(state.logger, "failed to set TCP_NODELAY"; "error" => %e);
+                }
                 version_message(state.magic).consensus_encode(&mut stream)?;
                 stream.flush()?;
                 let _ =
