@@ -1,6 +1,8 @@
 bitcoind_user = "bitcoinrpc"
 bitcoind_password = "taxation is theft"
 bind_address = "127.0.0.1"
+# Must match bitcoind's chain: bitcoin (default), testnet, signet or regtest.
+# network = "bitcoin"
 
 [user.public]
 password = "public"

@@ -27,6 +27,10 @@ pub struct State {
     pub peers: RwLock<Arc<Peers>>,
     pub max_peer_age: Duration,
     pub max_peer_concurrency: Option<usize>,
+    /// A peer on another network drops the connection rather than answering.
+    pub magic: u32,
+    /// Port to assume when `getpeerinfo` reports a peer address without one.
+    pub default_peer_port: u16,
 }
 impl State {
     pub fn leak(self) -> &'static Self {

@@ -54,6 +54,19 @@ pub fn create_state() -> Result<(State, SocketAddr), Error> {
     })?;
     let rpc_client = RpcClient::new(auth, bitcoin_uri, &logger);
 
+    let network_name = config.network.clone();
+    let network: bitcoin::network::constants::Network = network_name.parse().map_err(|_| {
+        let msg = "network must be one of: bitcoin, testnet, signet, regtest";
+        slog::error!(logger, "{}", msg; "network" => &network_name);
+        anyhow::anyhow!("{} (got {:?})", msg, network_name)
+    })?;
+    let default_peer_port = match network {
+        bitcoin::network::constants::Network::Bitcoin => 8333,
+        bitcoin::network::constants::Network::Testnet => 18333,
+        bitcoin::network::constants::Network::Signet => 38333,
+        bitcoin::network::constants::Network::Regtest => 18444,
+    };
+
     let tor_only = config.tor_only;
     let tor = config.tor_proxy.map(|proxy| TorState {
         proxy,
@@ -137,6 +150,8 @@ pub fn create_state() -> Result<(State, SocketAddr), Error> {
             peers: RwLock::new(Arc::new(Peers::new())),
             max_peer_age: Duration::from_secs(config.max_peer_age),
             max_peer_concurrency: config.max_peer_concurrency,
+            magic: network.magic(),
+            default_peer_port,
         },
         bind_addr,
     ))

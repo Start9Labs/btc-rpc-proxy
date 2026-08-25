@@ -10,7 +10,7 @@ use bitcoin::{
     consensus::{Decodable, Encodable},
     hash_types::BlockHash,
     network::{
-        constants::{Network::Bitcoin, ServiceFlags},
+        constants::ServiceFlags,
         message::{NetworkMessage, RawNetworkMessage},
         message_blockdata::Inventory,
         message_network::VersionMessage,
@@ -27,31 +27,46 @@ use crate::client::{
 use crate::rpc_methods::{GetBlock, GetBlockParams, GetPeerInfo, PeerAddressError};
 use crate::state::{State, TorState};
 
-type VersionMessageProducer = Box<dyn Fn() -> RawNetworkMessage + Send + Sync>;
-
-lazy_static::lazy_static! {
-    static ref VER_ACK: RawNetworkMessage = RawNetworkMessage {
-        magic: Bitcoin.magic(),
+fn ver_ack(magic: u32) -> RawNetworkMessage {
+    RawNetworkMessage {
+        magic,
         payload: NetworkMessage::Verack,
-    };
-    static ref VERSION_MESSAGE: VersionMessageProducer = Box::new(|| {
-        use std::time::SystemTime;
-        RawNetworkMessage {
-            magic: Bitcoin.magic(),
-            payload: NetworkMessage::Version(VersionMessage::new(
-                ServiceFlags::NONE,
-                SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64,
-                bitcoin::network::Address::new(&([127, 0, 0, 1], 8332).into(), ServiceFlags::NONE),
-                bitcoin::network::Address::new(&([127, 0, 0, 1], 8332).into(), ServiceFlags::NONE),
-                0,
-                format!("BTC RPC Proxy v{}", env!("CARGO_PKG_VERSION")),
-                0,
-            )),
-        }
+    }
+}
+
+fn version_message(magic: u32) -> RawNetworkMessage {
+    use std::time::SystemTime;
+    RawNetworkMessage {
+        magic,
+        payload: NetworkMessage::Version(VersionMessage::new(
+            ServiceFlags::NONE,
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+            bitcoin::network::Address::new(&([127, 0, 0, 1], 8332).into(), ServiceFlags::NONE),
+            bitcoin::network::Address::new(&([127, 0, 0, 1], 8332).into(), ServiceFlags::NONE),
+            0,
+            format!("BTC RPC Proxy v{}", env!("CARGO_PKG_VERSION")),
+            0,
+        )),
+    }
+}
+
+/// `Block::check_witness_commitment` returns true for any block with no
+/// witnesses at all, which is exactly what a stripping peer returns.
+fn check_witnesses(block: &Block) -> bool {
+    const COMMITMENT_MAGIC: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+    let commits = block.txdata.first().map_or(false, |coinbase| {
+        coinbase.output.iter().any(|o| {
+            o.script_pubkey.len() >= 38 && o.script_pubkey.as_bytes()[..6] == COMMITMENT_MAGIC
+        })
     });
+    let carries = block
+        .txdata
+        .iter()
+        .any(|tx| tx.input.iter().any(|i| !i.witness.is_empty()));
+    (carries || !commits) && block.check_witness_commitment()
 }
 
 #[derive(Debug)]
@@ -86,7 +101,9 @@ impl Peers {
                 .into_result()?
                 .into_iter()
                 .filter(|p| !p.inbound)
-                .filter(|p| p.servicesnames.contains("NETWORK"))
+                .filter(|p| {
+                    p.servicesnames.contains("NETWORK") && p.servicesnames.contains("WITNESS")
+                })
                 .map(|p| Peer::new(Arc::new(p.addr)))
                 .collect(),
             fetched: Some(Instant::now()),
@@ -152,9 +169,18 @@ impl Write for BitcoinPeerConnection {
     }
 }
 impl BitcoinPeerConnection {
+    /// `consensus_encode` writes a message in several small pieces, so Nagle
+    /// holds all but the first until the peer's delayed-ACK timer fires.
+    fn set_nodelay(&self) -> std::io::Result<()> {
+        match self {
+            BitcoinPeerConnection::Direct(s) => s.set_nodelay(true),
+            BitcoinPeerConnection::Proxied(s) => s.get_ref().set_nodelay(true),
+        }
+    }
+
     pub async fn connect(state: Arc<State>, mut addr: Arc<String>) -> Result<Self, Error> {
         if !addr.contains(":") {
-            addr = Arc::new(format!("{}:8333", &*addr));
+            addr = Arc::new(format!("{}:{}", &*addr, state.default_peer_port));
         }
         tokio::time::timeout(
             state.peer_timeout,
@@ -176,13 +202,16 @@ impl BitcoinPeerConnection {
                         _ => BitcoinPeerConnection::Direct(TcpStream::connect(&*addr)?),
                     }
                 };
-                VERSION_MESSAGE().consensus_encode(&mut stream)?;
+                if let Err(e) = stream.set_nodelay() {
+                    warn!(state.logger, "failed to set TCP_NODELAY"; "error" => %e);
+                }
+                version_message(state.magic).consensus_encode(&mut stream)?;
                 stream.flush()?;
                 let _ =
                     bitcoin::network::message::RawNetworkMessage::consensus_decode(&mut stream)?; // version
                 let _ =
                     bitcoin::network::message::RawNetworkMessage::consensus_decode(&mut stream)?; // verack
-                VER_ACK.consensus_encode(&mut stream)?;
+                ver_ack(state.magic).consensus_encode(&mut stream)?;
                 stream.flush()?;
 
                 Ok(stream)
@@ -285,11 +314,13 @@ async fn fetch_block_from_peer<'a>(
     hash: BlockHash,
     mut conn: RecyclableConnection,
 ) -> Result<(Block, RecyclableConnection), Error> {
+    let magic = state.magic;
     tokio::time::timeout(state.peer_timeout, async move {
         conn = tokio::task::spawn_blocking(move || {
             RawNetworkMessage {
-                magic: Bitcoin.magic(),
-                payload: NetworkMessage::GetData(vec![Inventory::Block(hash)]),
+                magic,
+                // MSG_BLOCK gets the witness-stripped serialization.
+                payload: NetworkMessage::GetData(vec![Inventory::WitnessBlock(hash)]),
             }
             .consensus_encode(&mut *conn)
             .map_err(Error::from)
@@ -309,7 +340,7 @@ async fn fetch_block_from_peer<'a>(
                 NetworkMessage::Block(b) => {
                     let returned_hash = b.block_hash();
                     let merkle_check = b.check_merkle_root();
-                    let witness_check = b.check_witness_commitment();
+                    let witness_check = check_witnesses(&b);
                     return match (returned_hash == hash, merkle_check, witness_check) {
                         (true, true, true) => Ok((b, conn)),
                         (true, true, false) => {
@@ -328,7 +359,7 @@ async fn fetch_block_from_peer<'a>(
                 NetworkMessage::Ping(p) => {
                     conn = tokio::task::spawn_blocking(move || {
                         RawNetworkMessage {
-                            magic: Bitcoin.magic(),
+                            magic,
                             payload: NetworkMessage::Pong(p),
                         }
                         .consensus_encode(&mut *conn)
@@ -431,4 +462,64 @@ pub async fn fetch_block(state: Arc<State>, hash: BlockHash) -> Result<Option<Bl
         ),
         None => None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_witnesses;
+    use bitcoin::blockdata::{
+        block::{Block, BlockHeader},
+        script::Script,
+        transaction::{OutPoint, Transaction, TxIn, TxOut},
+    };
+    use bitcoin::hashes::Hash;
+
+    fn block(commitment: bool, witness: bool) -> Block {
+        let mut commitment_spk = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+        commitment_spk.extend_from_slice(&[0x11; 32]);
+        Block {
+            header: BlockHeader {
+                version: 1,
+                prev_blockhash: bitcoin::BlockHash::all_zeros(),
+                merkle_root: bitcoin::TxMerkleNode::all_zeros(),
+                time: 0,
+                bits: 0,
+                nonce: 0,
+            },
+            txdata: vec![Transaction {
+                version: 1,
+                lock_time: bitcoin::PackedLockTime(0),
+                input: vec![TxIn {
+                    previous_output: OutPoint::null(),
+                    script_sig: Script::from(vec![0x51, 0x51]),
+                    sequence: bitcoin::Sequence::MAX,
+                    witness: if witness {
+                        bitcoin::Witness::from_vec(vec![vec![0; 32]])
+                    } else {
+                        bitcoin::Witness::default()
+                    },
+                }],
+                output: vec![TxOut {
+                    value: 0,
+                    script_pubkey: Script::from(if commitment {
+                        commitment_spk
+                    } else {
+                        vec![0x51]
+                    }),
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn a_block_that_commits_to_witnesses_must_carry_them() {
+        let stripped = block(true, false);
+        assert!(stripped.check_witness_commitment());
+        assert!(!check_witnesses(&stripped));
+    }
+
+    #[test]
+    fn a_block_with_no_commitment_needs_no_witnesses() {
+        assert!(check_witnesses(&block(false, false)));
+    }
 }

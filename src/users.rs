@@ -273,14 +273,8 @@ impl User {
                                 Ok((header, Some(block))) => Ok(Some(RpcResponse {
                                     id: req.id.clone(),
                                     result: {
-                                        let size = block.get_size();
-                                        let witness = block
-                                            .txdata
-                                            .iter()
-                                            .flat_map(|tx| tx.input.iter())
-                                            .flat_map(|input| input.witness.iter())
-                                            .map(|witness| witness.len())
-                                            .fold(0, |acc, x| acc + x);
+                                        let size = block.size();
+                                        let strippedsize = block.strippedsize();
                                         Some(serde_json::to_value(GetBlockResult {
                                             header: header.into_right().ok_or_else(|| {
                                                 anyhow::anyhow!(
@@ -288,12 +282,12 @@ impl User {
                                                 )
                                             })?,
                                             size,
-                                            strippedsize: if witness > 0 {
-                                                Some(size - witness)
+                                            strippedsize: if strippedsize != size {
+                                                Some(strippedsize)
                                             } else {
                                                 None
                                             },
-                                            weight: block.get_weight(),
+                                            weight: block.weight(),
                                             tx: block
                                                 .txdata
                                                 .into_iter()

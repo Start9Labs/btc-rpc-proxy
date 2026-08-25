@@ -30,8 +30,13 @@ Fetching is a per-user permission. Set `fetch_blocks = true` on a `[user.*]`, or
 Two options tune what a fetch costs:
 
 * `max_peer_concurrency` caps how many peers are asked for the same block at once. The first valid answer wins, so leaving it unset asks _every_ eligible peer and pulls the block several times over.
+* `max_peer_age` is how many seconds a peer list is reused before `getpeerinfo` is called for a fresh one (300 by default).
+
+Only peers advertising `NETWORK` and `WITNESS` are asked, since a fetched block is served with its witness data and checked against the witness commitment in its own coinbase.
 
 Peers are reached over clearnet, or through `tor_proxy` for `.onion` addresses. Reaching `.b32.i2p` peers additionally needs `i2p_proxy` pointed at an I2P SOCKSv5 proxy (i2pd's `socksproxy`, for instance); without one those peers cannot be used, as Tor cannot resolve them.
+
+`network` must match the chain bitcoind is on — it selects the p2p magic bytes and the default peer port, and a peer on another network drops the connection rather than answering, so getting it wrong makes every pruned block unfetchable. Accepted values are `bitcoin` (the default), `testnet`, `signet` and `regtest`. These are **not** the names Core uses in `chain=`: a node started with `chain=main` needs `network = "bitcoin"` here, and `chain=test` needs `network = "testnet"`. `testnet4` is not supported.
 
 ## Usage
 
