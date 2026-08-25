@@ -65,7 +65,6 @@ pub fn create_state() -> Result<(State, SocketAddr), Error> {
         bitcoin::network::constants::Network::Testnet => 18333,
         bitcoin::network::constants::Network::Signet => 38333,
         bitcoin::network::constants::Network::Regtest => 18444,
-        _ => 8333,
     };
 
     let tor_only = config.tor_only;

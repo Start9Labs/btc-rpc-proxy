@@ -27,10 +27,7 @@ pub struct State {
     pub peers: RwLock<Arc<Peers>>,
     pub max_peer_age: Duration,
     pub max_peer_concurrency: Option<usize>,
-    /// p2p magic bytes for the network bitcoind is on. Every message the block
-    /// fetcher exchanges with a peer carries it, and a peer on another network
-    /// drops the connection rather than answering, so this has to track
-    /// bitcoind's actual chain rather than being assumed to be mainnet.
+    /// A peer on another network drops the connection rather than answering.
     pub magic: u32,
     /// Port to assume when `getpeerinfo` reports a peer address without one.
     pub default_peer_port: u16,
