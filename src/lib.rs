@@ -22,7 +22,7 @@ use hyper::{
 pub use crate::client::{AuthSource, RpcClient};
 pub use crate::fetch_blocks::Peers;
 use crate::proxy::proxy_request;
-pub use crate::state::{State, TorState};
+pub use crate::state::{NetworkError, NetworkParams, State, TorState};
 pub use crate::users::{User, Users};
 
 pub async fn main(state: Arc<State>, bind_addr: systemd_socket::SocketAddr) -> Result<(), Error> {

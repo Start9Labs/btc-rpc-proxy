@@ -79,12 +79,6 @@ argument = false
 doc = "Map of user names to user configs. Each user must specify `password` field and an array of allowed calls named `allowed_calls`"
 
 [[param]]
-name = "network"
-type = "String"
-default = "\"bitcoin\".to_owned()"
-doc = "Which Bitcoin network the peers speak: bitcoin, testnet, signet or regtest. Selects the p2p magic bytes and the default peer port."
-
-[[param]]
 name = "peer_timeout"
 type = "u64"
 default = "30"
