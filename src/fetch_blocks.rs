@@ -179,8 +179,9 @@ impl BitcoinPeerConnection {
     }
 
     pub async fn connect(state: Arc<State>, mut addr: Arc<String>) -> Result<Self, Error> {
+        let network = state.network_params().await?;
         if !addr.contains(":") {
-            addr = Arc::new(format!("{}:{}", &*addr, state.default_peer_port));
+            addr = Arc::new(format!("{}:{}", &*addr, network.default_peer_port));
         }
         tokio::time::timeout(
             state.peer_timeout,
@@ -205,13 +206,13 @@ impl BitcoinPeerConnection {
                 if let Err(e) = stream.set_nodelay() {
                     warn!(state.logger, "failed to set TCP_NODELAY"; "error" => %e);
                 }
-                version_message(state.magic).consensus_encode(&mut stream)?;
+                version_message(network.magic).consensus_encode(&mut stream)?;
                 stream.flush()?;
                 let _ =
                     bitcoin::network::message::RawNetworkMessage::consensus_decode(&mut stream)?; // version
                 let _ =
                     bitcoin::network::message::RawNetworkMessage::consensus_decode(&mut stream)?; // verack
-                ver_ack(state.magic).consensus_encode(&mut stream)?;
+                ver_ack(network.magic).consensus_encode(&mut stream)?;
                 stream.flush()?;
 
                 Ok(stream)
@@ -314,7 +315,7 @@ async fn fetch_block_from_peer<'a>(
     hash: BlockHash,
     mut conn: RecyclableConnection,
 ) -> Result<(Block, RecyclableConnection), Error> {
-    let magic = state.magic;
+    let magic = state.network_params().await?.magic;
     tokio::time::timeout(state.peer_timeout, async move {
         conn = tokio::task::spawn_blocking(move || {
             RawNetworkMessage {

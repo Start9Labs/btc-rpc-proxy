@@ -1,5 +1,5 @@
 use bitcoin::hash_types::BlockHash;
-use linear_map::{set::LinearSet, LinearMap};
+use linear_map::set::LinearSet;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::client::RpcMethod;
@@ -183,93 +183,19 @@ impl<'de> Deserialize<'de> for GetPeerInfo {
 #[derive(Debug)]
 pub struct GetBlockchainInfo;
 
-// https://docs.rs/bitcoincore-rpc-json/0.12.0/src/bitcoincore_rpc_json/lib.rs.html#551-557
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Bip9SoftforkStatus {
-    Defined,
-    Started,
-    LockedIn,
-    Active,
-    Failed,
-}
-
-// https://docs.rs/bitcoincore-rpc-json/0.12.0/src/bitcoincore_rpc_json/lib.rs.html#560-566
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct Bip9SoftforkStatistics {
-    pub period: u32,
-    pub threshold: u32,
-    pub elapsed: u32,
-    pub count: u32,
-    pub possible: bool,
-}
-
-// https://docs.rs/bitcoincore-rpc-json/0.12.0/src/bitcoincore_rpc_json/lib.rs.html#569-577
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct Bip9SoftforkInfo {
-    pub status: Bip9SoftforkStatus,
-    pub bit: Option<u8>,
-    // Can be -1 for 0.18.x inactive ones.
-    pub start_time: i64,
-    pub timeout: u64,
-    pub since: u32,
-    pub statistics: Option<Bip9SoftforkStatistics>,
-}
-
-// https://docs.rs/bitcoincore-rpc-json/0.12.0/src/bitcoincore_rpc_json/lib.rs.html#581-584
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SoftforkType {
-    Buried,
-    Bip9,
-}
-
-// https://docs.rs/bitcoincore-rpc-json/0.12.0/src/bitcoincore_rpc_json/lib.rs.html#588-594
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct Softfork {
-    #[serde(rename = "type")]
-    pub type_: SoftforkType,
-    pub bip9: Option<Bip9SoftforkInfo>,
-    pub height: Option<u32>,
-    pub active: bool,
-}
-
-// https://docs.rs/bitcoincore-rpc-json/0.12.0/src/bitcoincore_rpc_json/lib.rs.html#700-740
+/// Only the fields the proxy reads, for the same reason as `PeerInfo`: naming a
+/// key here makes it mandatory, and this response has changed shape under it
+/// twice. `softforks` moved to `getdeploymentinfo` in Core 23.0 and was dropped
+/// outright in 24.0.1, and `warnings` became an array in 28.0 — both used to be
+/// named here, so as written this struct could not parse a current node at all.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct BlockchainInfo {
-    /// Current network name as defined in BIP70 (main, test, regtest)
+    /// The chain bitcoind is on, spelled as `-chain=` takes it: `main`, `test`,
+    /// `testnet4`, `signet` or `regtest`.
     pub chain: String,
-    /// The current number of blocks processed in the server
-    pub blocks: u64,
-    /// The current number of headers we have validated
-    pub headers: u64,
-    /// The hash of the currently best block
-    pub bestblockhash: bitcoin::BlockHash,
-    /// The current difficulty
-    pub difficulty: f64,
-    /// Median time for the current best block
-    pub mediantime: u64,
-    /// Estimate of verification progress [0..1]
-    pub verificationprogress: f64,
-    /// Estimate of whether this node is in Initial Block Download mode
-    pub initialblockdownload: bool,
-    /// Total amount of work in active chain, in hexadecimal
-    pub chainwork: HexBytes,
-    /// The estimated size of the block and undo files on disk
-    pub size_on_disk: u64,
-    /// If the blocks are subject to pruning
-    pub pruned: bool,
-    /// Lowest-height complete block stored (only present if pruning is enabled)
-    pub pruneheight: Option<u64>,
-    /// Whether automatic pruning is enabled (only present if pruning is enabled)
-    pub automatic_pruning: Option<bool>,
-    /// The target size used by pruning (only present if automatic pruning is enabled)
-    pub prune_target_size: Option<u64>,
-    /// Status of softforks in progress
-    #[serde(default)]
-    pub softforks: LinearMap<String, Softfork>,
-    /// Any network and blockchain warnings.
-    pub warnings: String,
+    /// The block challenge, emitted only on signet. Signet derives its p2p
+    /// magic from this, so a custom signet's differs from the default one's.
+    pub signet_challenge: Option<HexBytes>,
 }
 
 impl RpcMethod for GetBlockchainInfo {
@@ -300,7 +226,7 @@ impl<'de> Deserialize<'de> for GetBlockchainInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::PeerInfo;
+    use super::{BlockchainInfo, PeerInfo};
 
     /// One `getpeerinfo` entry exactly as Bitcoin Core v31.1 emits it for an
     /// outbound clearnet peer. Core 31.0 put `startingheight` behind
@@ -365,5 +291,97 @@ mod tests {
             .replace(r#""pingtime": 0.041,"#, "")
             .replace(r#""session_id": "abc""#, r#""session_id": """#);
         serde_json::from_str::<PeerInfo>(&stripped).expect("failed to parse");
+    }
+
+    /// `getblockchaininfo` off a Knots 29.4.1 node started with `-chain=signet`,
+    /// verbatim. Note `warnings` as an array, which Core 28.0 changed it to, and
+    /// no `softforks`, which Core 24.0.1 dropped.
+    const CORE_29_SIGNET: &str = r#"{
+      "chain": "signet",
+      "blocks": 0,
+      "headers": 0,
+      "bestblockhash": "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6",
+      "bits": "1e0377ae",
+      "target": "00000377ae000000000000000000000000000000000000000000000000000000",
+      "difficulty": 0.001126515290698186,
+      "time": 1598918400,
+      "mediantime": 1598918400,
+      "verificationprogress": 1.509425027448838e-08,
+      "initialblockdownload": true,
+      "chainwork": "000000000000000000000000000000000000000000000000000000000049d414",
+      "size_on_disk": 293,
+      "pruned": false,
+      "signet_challenge": "512103ad5e0edad18cb1f0fc0d28a3d4f1f3e445640337489abb10404f2d1e086be430210359ef5021964fe22d6f8e05b2463c9540ce96883fe3b278760f048f5189f2e6c452ae",
+      "warnings": [
+      ]
+    }"#;
+
+    #[test]
+    fn parses_core_29_signet() {
+        let info: BlockchainInfo = serde_json::from_str(CORE_29_SIGNET).expect("failed to parse");
+        assert_eq!(info.chain, "signet");
+        assert_eq!(
+            info.signet_challenge.as_ref().map(|c| c.len()),
+            Some(71),
+            "the challenge the signet magic is derived from"
+        );
+    }
+
+    /// Same node, `-chain=testnet4`. Every chain but signet omits the
+    /// challenge, and a missing key may not be an error.
+    #[test]
+    fn parses_core_29_testnet4() {
+        let info: BlockchainInfo = serde_json::from_str(
+            r#"{
+              "chain": "testnet4",
+              "blocks": 0,
+              "headers": 0,
+              "bestblockhash": "00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043",
+              "bits": "1d00ffff",
+              "target": "00000000ffff0000000000000000000000000000000000000000000000000000",
+              "difficulty": 1,
+              "time": 1714777860,
+              "mediantime": 1714777860,
+              "verificationprogress": 1.528233146510922e-08,
+              "initialblockdownload": true,
+              "chainwork": "0000000000000000000000000000000000000000000000000000000100010001",
+              "size_on_disk": 269,
+              "pruned": false,
+              "warnings": [
+              ]
+            }"#,
+        )
+        .expect("failed to parse");
+        assert_eq!(info.chain, "testnet4");
+        assert!(info.signet_challenge.is_none());
+    }
+
+    /// The single-string `warnings` of Core 27 and earlier, and the `softforks`
+    /// object dropped in 24.0.1, both still parse — nothing here names either.
+    /// A proxy may be pointed at a node older than the one above.
+    #[test]
+    fn parses_older_node_shape() {
+        let info: BlockchainInfo = serde_json::from_str(
+            r#"{
+              "chain": "main",
+              "blocks": 800000,
+              "headers": 800000,
+              "bestblockhash": "00000000000000000002a7c4c1e48d76c5a37902165a270156b7a8d72728a054",
+              "difficulty": 53911173001054.59,
+              "mediantime": 1690168629,
+              "verificationprogress": 0.9999,
+              "initialblockdownload": false,
+              "chainwork": "00000000000000000000000000000000000000004fd66f4dd0d1a9b8a4b6a7ad",
+              "size_on_disk": 500000000,
+              "pruned": true,
+              "pruneheight": 799000,
+              "automatic_pruning": true,
+              "prune_target_size": 550000000,
+              "softforks": { "bip34": { "type": "buried", "active": true, "height": 227931 } },
+              "warnings": ""
+            }"#,
+        )
+        .expect("failed to parse");
+        assert_eq!(info.chain, "main");
     }
 }

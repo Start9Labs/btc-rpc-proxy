@@ -36,7 +36,7 @@ Only peers advertising `NETWORK` and `WITNESS` are asked, since a fetched block 
 
 Peers are reached over clearnet, or through `tor_proxy` for `.onion` addresses. Reaching `.b32.i2p` peers additionally needs `i2p_proxy` pointed at an I2P SOCKSv5 proxy (i2pd's `socksproxy`, for instance); without one those peers cannot be used, as Tor cannot resolve them.
 
-`network` must match the chain bitcoind is on — it selects the p2p magic bytes and the default peer port, and a peer on another network drops the connection rather than answering, so getting it wrong makes every pruned block unfetchable. Accepted values are `bitcoin` (the default), `testnet`, `signet` and `regtest`. These are **not** the names Core uses in `chain=`: a node started with `chain=main` needs `network = "bitcoin"` here, and `chain=test` needs `network = "testnet"`. `testnet4` is not supported.
+Which network the peers speak is not configured. The p2p magic bytes and the default peer port are taken from bitcoind's own `getblockchaininfo` the first time a block has to be fetched, and cached for the life of the process — a node cannot change chain without a restart, and the proxy restarts with it. `main`, `test`, `testnet4`, `signet` and `regtest` are all understood, and a signet's magic is computed from the challenge that node reports, so custom signets work too.
 
 ## Usage
 
