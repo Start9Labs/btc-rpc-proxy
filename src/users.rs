@@ -424,12 +424,9 @@ impl User {
                         ))
                     }
                 };
-                // Core reports -1 confirmations for a header that is not on the
-                // main chain, and for a transaction in such a block it answers
-                // `in_active_chain: false` with `confirmations: 0` rather than a
-                // negative count. Match that, rather than asserting the block is
-                // current: a caller handed a reorged-out blockhash deserves the
-                // same answer here as it would get from bitcoind directly.
+                // For a block off the main chain Core answers
+                // `in_active_chain: false` with `confirmations: 0`, and omits
+                // `time` and `blocktime` entirely.
                 let in_active_chain = header.confirmations >= 0;
                 if let Some(obj) = decoded.as_object_mut() {
                     obj.insert("in_active_chain".to_owned(), Value::Bool(in_active_chain));
@@ -443,8 +440,10 @@ impl User {
                             0
                         }),
                     );
-                    obj.insert("time".to_owned(), serde_json::json!(header.time));
-                    obj.insert("blocktime".to_owned(), serde_json::json!(header.time));
+                    if in_active_chain {
+                        obj.insert("time".to_owned(), serde_json::json!(header.time));
+                        obj.insert("blocktime".to_owned(), serde_json::json!(header.time));
+                    }
                 }
                 Ok(Some(RpcResponse {
                     id: req.id.clone(),
