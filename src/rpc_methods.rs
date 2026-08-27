@@ -1,6 +1,7 @@
-use bitcoin::hash_types::BlockHash;
+use bitcoin::hash_types::{BlockHash, Txid};
 use linear_map::set::LinearSet;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
 
 use crate::client::RpcMethod;
 use crate::util::{Either, HexBytes};
@@ -79,7 +80,12 @@ impl<'de> Deserialize<'de> for GetBlockHeader {
 #[serde(rename_all = "camelCase")]
 pub struct GetBlockHeaderResult {
     pub hash: bitcoin::BlockHash,
-    pub confirmations: u32,
+    /// Signed, because Core returns **-1** for a header that is not on the main
+    /// chain. As `u32` this failed to deserialize and surfaced as "can't be
+    /// parsed as json", which is a confusing way to learn a block was reorged
+    /// out. Both callers of this struct go through `getblockheader` with
+    /// verbose set, so both could hit it.
+    pub confirmations: i32,
     pub height: usize,
     pub version: i32,
     pub version_hex: Option<HexBytes>,
@@ -177,6 +183,67 @@ impl<'de> Deserialize<'de> for GetPeerInfo {
                 &Self.as_str(),
             ))
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct GetRawTransaction;
+
+/// `getrawtransaction "txid" ( verbose "blockhash" )`.
+///
+/// Only the three-argument form is intercepted. Without a blockhash Core needs
+/// `txindex`, and the proxy has no txid index of its own to substitute for one.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct GetRawTransactionParams(
+    pub Txid,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub Option<Value>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub Option<BlockHash>,
+);
+impl RpcMethod for GetRawTransaction {
+    type Params = GetRawTransactionParams;
+    type Response = Value;
+    fn as_str(&self) -> &'static str {
+        "getrawtransaction"
+    }
+}
+impl Serialize for GetRawTransaction {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.as_str().serialize(serializer)
+    }
+}
+
+#[derive(Debug)]
+pub struct DecodeRawTransaction;
+
+/// The rendering half of a verbose `getrawtransaction`, done by Core rather
+/// than reimplemented here.
+///
+/// `decoderawtransaction` returns `txid`, `hash`, `version`, `size`, `vsize`,
+/// `weight`, `locktime`, `vin` and `vout`, and those nine are byte-identical to
+/// what verbose `getrawtransaction` returns for the same transaction. That
+/// matters: `vout[].scriptPubKey` carries `asm`, `desc`, `address` and `type`,
+/// which are Core's own script classification and address encoding. Producing
+/// them here would mean reproducing that classifier and getting it wrong at the
+/// edges. Asking Core cannot be wrong.
+///
+/// A one-element tuple rather than a newtype struct: serde renders a
+/// single-field tuple struct as the bare inner value, which JSON-RPC rejects
+/// with "Params must be an array or object".
+pub type DecodeRawTransactionParams = (String,);
+impl RpcMethod for DecodeRawTransaction {
+    type Params = DecodeRawTransactionParams;
+    type Response = Value;
+    fn as_str(&self) -> &'static str {
+        "decoderawtransaction"
+    }
+}
+impl Serialize for DecodeRawTransaction {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.as_str().serialize(serializer)
     }
 }
 
@@ -354,6 +421,33 @@ mod tests {
         .expect("failed to parse");
         assert_eq!(info.chain, "testnet4");
         assert!(info.signet_challenge.is_none());
+    }
+
+    /// Core reports -1 confirmations for a header that is not on the main
+    /// chain. This was `u32`, so a reorged-out block surfaced as "can't be
+    /// parsed as json" from whichever call happened to ask.
+    #[test]
+    fn parses_a_stale_block_header() {
+        let header: super::GetBlockHeaderResult = serde_json::from_str(
+            r#"{
+              "hash": "07bf0e81736da8923db558d5768a7006e2b93ce355103ca84af823fcade035e6",
+              "confirmations": -1,
+              "height": 804,
+              "version": 536870912,
+              "versionHex": "20000000",
+              "merkleroot": "578e22da1ca66f343029c9e95afa42e8ea34e1c407c57cb2f3e87f0073ae9362",
+              "time": 1787000000,
+              "mediantime": 1787000000,
+              "nonce": 1,
+              "bits": "207fffff",
+              "difficulty": 4.656542373906925e-10,
+              "chainwork": "0000000000000000000000000000000000000000000000000000000000000002",
+              "nTx": 2,
+              "previousblockhash": "60facf42231c33113d9bd67062d2ec290604458937db0fa0d0c13f2c074e9344"
+            }"#,
+        )
+        .expect("a stale header must parse");
+        assert_eq!(header.confirmations, -1);
     }
 
     /// The single-string `warnings` of Core 27 and earlier, and the `softforks`

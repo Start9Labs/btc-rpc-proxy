@@ -11,7 +11,10 @@ use crate::client::{
     PRUNE_ERROR_MESSAGE,
 };
 use crate::fetch_blocks::{fetch_block, fetch_block_raw};
-use crate::rpc_methods::{GetBlock, GetBlockHeader, GetBlockHeaderParams, GetBlockResult};
+use crate::rpc_methods::{
+    DecodeRawTransaction, GetBlock, GetBlockHeader, GetBlockHeaderParams, GetBlockResult,
+    GetRawTransaction,
+};
 use crate::state::State;
 
 pub use password::Password;
@@ -312,6 +315,11 @@ impl User {
                         _ => Ok(None), // TODO
                     }
                 }
+                GenericRpcParams::Array(params)
+                    if self.fetch_blocks && &*req.method == GetRawTransaction.as_str() =>
+                {
+                    self.intercept_raw_transaction(state, req, params).await
+                }
                 _ => Ok(None),
             }
         } else {
@@ -321,6 +329,219 @@ impl User {
                 status: Some(StatusCode::FORBIDDEN),
             })
         }
+    }
+
+    /// `getrawtransaction "txid" ( verbose "blockhash" )` for a block bitcoind
+    /// has pruned.
+    ///
+    /// **Only with a blockhash.** Core needs `txindex` to find a transaction
+    /// without one, and the proxy has no txid index to substitute; a request
+    /// that omits it is passed through so Core can answer or refuse on its own
+    /// terms. With a blockhash Core needs only the block, which is exactly what
+    /// this proxy can fetch from peers.
+    ///
+    /// This is what an Electrum server needs to serve a verbose transaction
+    /// lookup on a pruned node: electrs finds the blockhash in its own index and
+    /// passes it here.
+    async fn intercept_raw_transaction<'a>(
+        &self,
+        state: Arc<State>,
+        req: &'a RpcRequest<GenericRpcMethod>,
+        params: &'a [Value],
+    ) -> Result<Option<RpcResponse<GenericRpcMethod>>, RpcError> {
+        let (txid, verbose, blockhash) = match interceptable(params) {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+
+        let block = match fetch_block(state.clone(), blockhash).await {
+            Ok(Some(block)) => block,
+            Ok(None) => {
+                return Ok(Some(RpcResponse {
+                    id: req.id.clone(),
+                    result: None,
+                    error: Some(RpcError {
+                        code: MISC_ERROR_CODE,
+                        message: PRUNE_ERROR_MESSAGE.to_owned(),
+                        status: None,
+                    }),
+                }))
+            }
+            Err(e) => return Ok(Some(e.into())),
+        };
+
+        let tx = match block.txdata.iter().find(|tx| tx.txid() == txid) {
+            Some(tx) => tx,
+            // Core's own wording for this case, so a caller cannot tell the
+            // difference between a proxied answer and a direct one.
+            None => {
+                return Ok(Some(RpcResponse {
+                    id: req.id.clone(),
+                    result: None,
+                    error: Some(RpcError {
+                        code: MISC_ERROR_CODE,
+                        message: "No such transaction found in the provided block.".to_owned(),
+                        status: None,
+                    }),
+                }))
+            }
+        };
+        let hex = bitcoin::consensus::encode::serialize_hex(tx);
+
+        if !verbose {
+            return Ok(Some(RpcResponse {
+                id: req.id.clone(),
+                result: Some(Value::String(hex)),
+                error: None,
+            }));
+        }
+
+        // The nine fields decoderawtransaction returns are byte-identical to
+        // verbose getrawtransaction's, script classification and addresses
+        // included, so Core renders them rather than this reproducing them. The
+        // six that remain come from the header, which Core keeps when pruned.
+        let decode_req = RpcRequest {
+            id: None,
+            method: DecodeRawTransaction,
+            params: (hex.clone(),),
+        };
+        let header_req = RpcRequest {
+            id: None,
+            method: GetBlockHeader,
+            params: GetBlockHeaderParams(blockhash, Some(true)),
+        };
+        match futures::try_join!(
+            async { state.rpc_client.call(&decode_req).await?.into_result() },
+            async { state.rpc_client.call(&header_req).await?.into_result() },
+        ) {
+            Ok((mut decoded, header)) => {
+                let header = match header.into_right() {
+                    Some(h) => h,
+                    None => {
+                        return Ok(Some(
+                            RpcError::from(Error::msg("unexpected response for getblockheader"))
+                                .into(),
+                        ))
+                    }
+                };
+                // For a block off the main chain Core answers
+                // `in_active_chain: false` with `confirmations: 0`, and omits
+                // `time` and `blocktime` entirely.
+                let in_active_chain = header.confirmations >= 0;
+                if let Some(obj) = decoded.as_object_mut() {
+                    obj.insert("in_active_chain".to_owned(), Value::Bool(in_active_chain));
+                    obj.insert("hex".to_owned(), Value::String(hex));
+                    obj.insert("blockhash".to_owned(), serde_json::json!(blockhash));
+                    obj.insert(
+                        "confirmations".to_owned(),
+                        serde_json::json!(if in_active_chain {
+                            header.confirmations
+                        } else {
+                            0
+                        }),
+                    );
+                    if in_active_chain {
+                        obj.insert("time".to_owned(), serde_json::json!(header.time));
+                        obj.insert("blocktime".to_owned(), serde_json::json!(header.time));
+                    }
+                }
+                Ok(Some(RpcResponse {
+                    id: req.id.clone(),
+                    result: Some(decoded),
+                    error: None,
+                }))
+            }
+            Err(e) => Ok(Some(e.into())),
+        }
+    }
+}
+
+/// Whether a `getrawtransaction` call is one this proxy can answer, and its
+/// arguments if so.
+///
+/// `None` means pass it through to Core untouched, which is the right answer
+/// for everything the proxy cannot improve on:
+///
+/// - **no blockhash**: Core needs `txindex` to find the transaction, and the
+///   proxy has no txid index to substitute for one
+/// - **verbosity 2**: wants prevout data, which needs the undo files a pruned
+///   node has also discarded
+/// - **anything malformed**: Core writes better argument errors than this would
+fn interceptable(params: &[Value]) -> Option<(bitcoin::Txid, bool, bitcoin::BlockHash)> {
+    let blockhash = serde_json::from_value(params.get(2)?.clone()).ok()?;
+    let verbose = match params.get(1) {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        // Core accepts 0 and 1 for the boolean, and 2 for a form this cannot serve.
+        Some(Value::Number(n)) if n.as_u64() == Some(0) => false,
+        Some(Value::Number(n)) if n.as_u64() == Some(1) => true,
+        _ => return None,
+    };
+    let txid = serde_json::from_value(params.first()?.clone()).ok()?;
+    Some((txid, verbose, blockhash))
+}
+
+#[cfg(test)]
+mod raw_transaction_tests {
+    use super::interceptable;
+    use serde_json::json;
+
+    const TXID: &str = "780124042ee6e11fc3eeceec7d3b27379d71c4901e18d516ed1491eba025ba85";
+    const HASH: &str = "60facf42231c33113d9bd67062d2ec290604458937db0fa0d0c13f2c074e9344";
+
+    /// The form electrs sends, which is the whole reason this exists.
+    #[test]
+    fn verbose_with_a_blockhash_is_intercepted() {
+        let (txid, verbose, blockhash) =
+            interceptable(&[json!(TXID), json!(true), json!(HASH)]).expect("should intercept");
+        assert_eq!(txid.to_string(), TXID);
+        assert_eq!(blockhash.to_string(), HASH);
+        assert!(verbose);
+    }
+
+    #[test]
+    fn non_verbose_with_a_blockhash_is_intercepted() {
+        let (_, verbose, _) =
+            interceptable(&[json!(TXID), json!(false), json!(HASH)]).expect("should intercept");
+        assert!(!verbose);
+    }
+
+    /// Core takes 0 and 1 as well as false and true.
+    #[test]
+    fn numeric_verbosity_zero_and_one_are_intercepted() {
+        assert!(
+            !interceptable(&[json!(TXID), json!(0), json!(HASH)])
+                .unwrap()
+                .1
+        );
+        assert!(
+            interceptable(&[json!(TXID), json!(1), json!(HASH)])
+                .unwrap()
+                .1
+        );
+    }
+
+    /// Without a blockhash there is nothing to fetch: Core needs txindex and the
+    /// proxy has no index of its own. Passing through lets Core say so.
+    #[test]
+    fn no_blockhash_passes_through() {
+        assert!(interceptable(&[json!(TXID), json!(true)]).is_none());
+        assert!(interceptable(&[json!(TXID)]).is_none());
+    }
+
+    /// Verbosity 2 asks for prevouts, which need undo data a pruned node has
+    /// also discarded. Answering it without them would be answering wrongly.
+    #[test]
+    fn verbosity_two_passes_through() {
+        assert!(interceptable(&[json!(TXID), json!(2), json!(HASH)]).is_none());
+    }
+
+    #[test]
+    fn malformed_arguments_pass_through() {
+        assert!(interceptable(&[json!(TXID), json!("yes"), json!(HASH)]).is_none());
+        assert!(interceptable(&[json!(TXID), json!(true), json!("not a hash")]).is_none());
+        assert!(interceptable(&[json!("not a txid"), json!(true), json!(HASH)]).is_none());
+        assert!(interceptable(&[]).is_none());
     }
 }
 
