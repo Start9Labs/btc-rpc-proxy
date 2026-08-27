@@ -34,6 +34,8 @@ Two options tune what a fetch costs:
 
 Only peers advertising `NETWORK` and `WITNESS` are asked, since a fetched block is served with its witness data and checked against the witness commitment in its own coinbase.
 
+The same fetch answers `getrawtransaction` when a blockhash is given, which is what an Electrum server needs to serve a verbose transaction lookup against a pruned node.
+
 A block fetched from a peer is kept in memory so the next request for it does not go back to the network. Only peer-fetched blocks are cached, since anything bitcoind still holds is cheap to ask for again. `block_cache_size_mib` bounds it, 64 by default, and 0 turns it off. The bound matters: an unbounded cache would give back the disk saving that motivates running pruned in the first place.
 
 Peers are reached over clearnet, or through `tor_proxy` for `.onion` addresses. Reaching `.b32.i2p` peers additionally needs `i2p_proxy` pointed at an I2P SOCKSv5 proxy (i2pd's `socksproxy`, for instance); without one those peers cannot be used, as Tor cannot resolve them.
@@ -64,7 +66,8 @@ Especially in case of packaged software.
 ## Limitations
 
 * It uses `serde_json`, which allocates during deserialization (`Value`). Expect a bit lower performance than without proxy.
-* Only `getblock` verbosity 0 and 1 are intercepted. Verbosity 2 is forwarded to your node, so it still fails for a pruned block — and could not be answered faithfully anyway, since the per-input `fee` fields need undo data a pruned node no longer has.
+* `getblock` is intercepted at verbosity 0 and 1. Verbosity 2 is forwarded to your node, so it still fails for a pruned block — and could not be answered faithfully anyway, since the per-input `fee` fields need undo data a pruned node no longer has.
+* `getrawtransaction` is intercepted only when a blockhash is given. Without one Core needs `txindex` and the proxy has no txid index to substitute for it; verbosity 2 needs the same undo data as above. Both are forwarded.
 * Logging can't be configured yet.
 * No support for changing UID.
 * No support for Unix sockets.

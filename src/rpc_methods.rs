@@ -423,9 +423,6 @@ mod tests {
         assert!(info.signet_challenge.is_none());
     }
 
-    /// The single-string `warnings` of Core 27 and earlier, and the `softforks`
-    /// object dropped in 24.0.1, both still parse — nothing here names either.
-    /// A proxy may be pointed at a node older than the one above.
     /// Core reports -1 confirmations for a header that is not on the main
     /// chain. This was `u32`, so a reorged-out block surfaced as "can't be
     /// parsed as json" from whichever call happened to ask.
@@ -453,6 +450,9 @@ mod tests {
         assert_eq!(header.confirmations, -1);
     }
 
+    /// The single-string `warnings` of Core 27 and earlier, and the `softforks`
+    /// object dropped in 24.0.1, both still parse — nothing here names either.
+    /// A proxy may be pointed at a node older than the one above.
     #[test]
     fn parses_older_node_shape() {
         let info: BlockchainInfo = serde_json::from_str(
