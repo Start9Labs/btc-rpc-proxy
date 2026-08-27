@@ -1,6 +1,8 @@
 bitcoind_user = "bitcoinrpc"
 bitcoind_password = "taxation is theft"
 bind_address = "127.0.0.1"
+# Mebibytes of peer-fetched blocks to keep in memory. 0 disables the cache.
+# block_cache_size_mib = 64
 
 [user.public]
 password = "public"

@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate slog;
 
+pub mod block_cache;
 pub mod client;
 pub mod fetch_blocks;
 pub mod proxy;
@@ -19,6 +20,7 @@ use hyper::{
     service::{make_service_fn, service_fn},
 };
 
+pub use crate::block_cache::BlockCache;
 pub use crate::client::{AuthSource, RpcClient};
 pub use crate::fetch_blocks::Peers;
 use crate::proxy::proxy_request;

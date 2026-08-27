@@ -8,6 +8,7 @@ use bitcoin::hashes::{sha256d, Hash};
 use slog::Logger;
 use tokio::sync::{OnceCell, RwLock};
 
+use crate::block_cache::BlockCache;
 use crate::client::{RpcClient, RpcRequest};
 use crate::fetch_blocks::{PeerHandle, Peers};
 use crate::rpc_methods::{BlockchainInfo, GetBlockchainInfo};
@@ -103,6 +104,8 @@ pub struct State {
     /// Filled in from bitcoind the first time a block is fetched from a peer.
     /// A node cannot change chain without a restart, and this restarts with it.
     pub network: OnceCell<NetworkParams>,
+    /// Blocks fetched from peers, so the same one is not pulled twice.
+    pub block_cache: BlockCache,
 }
 impl State {
     pub fn leak(self) -> &'static Self {

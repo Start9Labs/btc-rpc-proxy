@@ -34,6 +34,8 @@ Two options tune what a fetch costs:
 
 Only peers advertising `NETWORK` and `WITNESS` are asked, since a fetched block is served with its witness data and checked against the witness commitment in its own coinbase.
 
+A block fetched from a peer is kept in memory so the next request for it does not go back to the network. Only peer-fetched blocks are cached, since anything bitcoind still holds is cheap to ask for again. `block_cache_size_mib` bounds it, 64 by default, and 0 turns it off. The bound matters: an unbounded cache would give back the disk saving that motivates running pruned in the first place.
+
 Peers are reached over clearnet, or through `tor_proxy` for `.onion` addresses. Reaching `.b32.i2p` peers additionally needs `i2p_proxy` pointed at an I2P SOCKSv5 proxy (i2pd's `socksproxy`, for instance); without one those peers cannot be used, as Tor cannot resolve them.
 
 Which network the peers speak is not configured. The p2p magic bytes and the default peer port are taken from bitcoind's own `getblockchaininfo` the first time a block has to be fetched, and cached for the life of the process — a node cannot change chain without a restart, and the proxy restarts with it. `main`, `test`, `testnet4`, `signet` and `regtest` are all understood, and a signet's magic is computed from the challenge that node reports, so custom signets work too.

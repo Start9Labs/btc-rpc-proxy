@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::Error;
 use btc_rpc_proxy::users::Password;
-use btc_rpc_proxy::{AuthSource, Peers, RpcClient, State, TorState};
+use btc_rpc_proxy::{AuthSource, BlockCache, Peers, RpcClient, State, TorState};
 use slog::Drain;
 use systemd_socket::SocketAddr;
 use tokio::sync::{OnceCell, RwLock};
@@ -138,6 +138,11 @@ pub fn create_state() -> Result<(State, SocketAddr), Error> {
             max_peer_age: Duration::from_secs(config.max_peer_age),
             max_peer_concurrency: config.max_peer_concurrency,
             network: OnceCell::new(),
+            // Saturating, because a nonsense value here would otherwise wrap:
+            // in release that silently yields a tiny cache, and in debug it
+            // panics at startup. Saturating gives "as much as this machine
+            // could address", which is the honest reading of an absurd number.
+            block_cache: BlockCache::new(config.block_cache_size_mib.saturating_mul(1024 * 1024)),
         },
         bind_addr,
     ))

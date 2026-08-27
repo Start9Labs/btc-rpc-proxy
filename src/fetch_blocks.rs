@@ -430,6 +430,12 @@ pub async fn fetch_block_raw(
     state: Arc<State>,
     hash: BlockHash,
 ) -> Result<Option<Bytes>, RpcError> {
+    // Ahead of bitcoind, not behind it: the cache only holds blocks bitcoind did
+    // not have, so a hit is always cheaper than the round trip that would miss.
+    if let Some(block) = state.block_cache.get(&hash) {
+        debug!(state.logger, "Serving a block from the peer-fetch cache."; "block_hash" => %hash);
+        return Ok(Some(block));
+    }
     if let Some(block) = fetch_block_from_self(&*state, hash).await? {
         return Ok(Some(block));
     }
@@ -452,7 +458,9 @@ pub async fn fetch_block_raw(
     block
         .consensus_encode(&mut serialized)
         .map_err(Error::from)?;
-    Ok(Some(Bytes::from(serialized)))
+    let serialized = Bytes::from(serialized);
+    state.block_cache.insert(hash, serialized.clone());
+    Ok(Some(serialized))
 }
 
 pub async fn fetch_block(state: Arc<State>, hash: BlockHash) -> Result<Option<Block>, RpcError> {
