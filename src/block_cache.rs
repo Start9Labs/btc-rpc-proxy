@@ -96,7 +96,7 @@ impl BlockCache {
         }
     }
 
-    /// Blocks held and bytes held, for tests and for logging.
+    /// Blocks held and bytes held.
     pub fn stats(&self) -> (usize, usize) {
         let inner = self.lock();
         (inner.blocks.len(), inner.bytes)
