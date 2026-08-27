@@ -79,6 +79,12 @@ argument = false
 doc = "Map of user names to user configs. Each user must specify `password` field and an array of allowed calls named `allowed_calls`"
 
 [[param]]
+name = "block_cache_size_mib"
+type = "usize"
+default = "64"
+doc = "How many mebibytes of peer-fetched blocks to keep in memory. Only blocks bitcoind no longer has are cached, since anything it still holds is cheap to ask for. Zero disables the cache."
+
+[[param]]
 name = "peer_timeout"
 type = "u64"
 default = "30"
