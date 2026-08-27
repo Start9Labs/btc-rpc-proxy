@@ -1,9 +1,11 @@
 #[macro_use]
 extern crate slog;
 
+pub mod any_block;
 pub mod block_cache;
 pub mod client;
 pub mod fetch_blocks;
+pub mod header_v2;
 pub mod proxy;
 pub mod rpc_methods;
 pub mod state;

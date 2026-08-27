@@ -24,6 +24,11 @@ use socks::Socks5Stream;
 use crate::client::{
     ClientError, RpcClient, RpcError, RpcRequest, MISC_ERROR_CODE, PRUNE_ERROR_MESSAGE,
 };
+use std::convert::TryInto;
+
+use bitcoin::hashes::Hash as _;
+
+use crate::any_block::AnyBlock;
 use crate::rpc_methods::{GetBlock, GetBlockParams, GetPeerInfo, PeerAddressError};
 use crate::state::{State, TorState};
 
@@ -53,20 +58,73 @@ fn version_message(magic: u32) -> RawNetworkMessage {
     }
 }
 
-/// `Block::check_witness_commitment` returns true for any block with no
-/// witnesses at all, which is exactly what a stripping peer returns.
-fn check_witnesses(block: &Block) -> bool {
-    const COMMITMENT_MAGIC: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
-    let commits = block.txdata.first().map_or(false, |coinbase| {
-        coinbase.output.iter().any(|o| {
-            o.script_pubkey.len() >= 38 && o.script_pubkey.as_bytes()[..6] == COMMITMENT_MAGIC
-        })
-    });
-    let carries = block
-        .txdata
-        .iter()
-        .any(|tx| tx.input.iter().any(|i| !i.witness.is_empty()));
-    (carries || !commits) && block.check_witness_commitment()
+/// The largest p2p payload this will hold in memory.
+///
+/// Bitcoin Core caps a protocol message at 4 MB and `rust-bitcoin` bounds its
+/// own decoding at the same figure. The framing below reads a length straight
+/// off the wire before it can be validated any other way, so it needs a bound
+/// of its own or a peer could name any number and have us allocate it.
+const MAX_FRAME_PAYLOAD: usize = 4_000_000;
+
+/// One p2p message, with a `block` payload deliberately left unparsed.
+enum Frame {
+    /// The raw payload of a `block` message, still bytes.
+    Block(Vec<u8>),
+    Other(RawNetworkMessage),
+}
+
+/// Read one p2p message, without letting `rust-bitcoin` parse a block.
+///
+/// This exists because `RawNetworkMessage::consensus_decode` eagerly decodes a
+/// `block` payload into `bitcoin::Block`, whose header is fixed at 80 bytes. On
+/// a header-v2 chain that fails on the wire, before any of the proxy's checks
+/// run, so a pruned block on such a chain could not be fetched at all. Framing
+/// the message here and handing a `block` payload to `AnyBlock` instead is what
+/// makes both formats reachable.
+///
+/// Everything else is re-assembled and passed to `rust-bitcoin` unchanged, so
+/// version, verack and ping keep their existing handling.
+fn read_frame(conn: &mut impl Read, expected_magic: u32) -> Result<Frame, Error> {
+    let mut head = [0u8; 24];
+    conn.read_exact(&mut head)?;
+
+    let magic = u32::from_le_bytes(head[0..4].try_into().unwrap());
+    if magic != expected_magic {
+        anyhow::bail!(
+            "wrong network magic: expected {:x}, got {:x}",
+            expected_magic,
+            magic
+        );
+    }
+    let len = u32::from_le_bytes(head[16..20].try_into().unwrap()) as usize;
+    if len > MAX_FRAME_PAYLOAD {
+        anyhow::bail!(
+            "peer announced a {}-byte message, over the {}-byte cap",
+            len,
+            MAX_FRAME_PAYLOAD
+        );
+    }
+
+    let mut payload = vec![0u8; len];
+    conn.read_exact(&mut payload)?;
+
+    // The checksum is normally rust-bitcoin's job. A block payload never
+    // reaches it, so verify here rather than trust a length and a command.
+    let digest = bitcoin::hashes::sha256d::Hash::hash(&payload);
+    if digest.into_inner()[0..4] != head[20..24] {
+        anyhow::bail!("p2p message checksum mismatch");
+    }
+
+    if &head[4..16] == b"block\0\0\0\0\0\0\0" {
+        return Ok(Frame::Block(payload));
+    }
+
+    let mut whole = Vec::with_capacity(24 + len);
+    whole.extend_from_slice(&head);
+    whole.extend_from_slice(&payload);
+    Ok(Frame::Other(RawNetworkMessage::consensus_decode(
+        &mut std::io::Cursor::new(whole),
+    )?))
 }
 
 #[derive(Debug)]
@@ -314,7 +372,7 @@ async fn fetch_block_from_peer<'a>(
     state: Arc<State>,
     hash: BlockHash,
     mut conn: RecyclableConnection,
-) -> Result<(Block, RecyclableConnection), Error> {
+) -> Result<(AnyBlock, RecyclableConnection), Error> {
     let magic = state.network_params().await?.magic;
     tokio::time::timeout(state.peer_timeout, async move {
         conn = tokio::task::spawn_blocking(move || {
@@ -330,18 +388,20 @@ async fn fetch_block_from_peer<'a>(
         .await??;
 
         loop {
-            let (msg, conn_) = tokio::task::spawn_blocking(move || {
-                RawNetworkMessage::consensus_decode(&mut *conn)
-                    .map_err(Error::from)
-                    .map(|msg| (msg, conn))
+            let (frame, conn_) = tokio::task::spawn_blocking(move || {
+                read_frame(&mut *conn, magic).map(|f| (f, conn))
             })
             .await??;
             conn = conn_;
-            match msg.payload {
-                NetworkMessage::Block(b) => {
+            let msg = match frame {
+                Frame::Block(payload) => {
+                    // Parsed here rather than by rust-bitcoin, so a 164-byte
+                    // header is readable. The checks are the same three as
+                    // before, over a type that can hold either format.
+                    let b = AnyBlock::parse(&payload)?;
                     let returned_hash = b.block_hash();
                     let merkle_check = b.check_merkle_root();
-                    let witness_check = check_witnesses(&b);
+                    let witness_check = b.check_witnesses();
                     return match (returned_hash == hash, merkle_check, witness_check) {
                         (true, true, true) => Ok((b, conn)),
                         (true, true, false) => {
@@ -357,6 +417,9 @@ async fn fetch_block_from_peer<'a>(
                         )),
                     };
                 }
+                Frame::Other(m) => m,
+            };
+            match msg.payload {
                 NetworkMessage::Ping(p) => {
                     conn = tokio::task::spawn_blocking(move || {
                         RawNetworkMessage {
@@ -380,7 +443,7 @@ async fn fetch_block_from_peers(
     state: Arc<State>,
     peers: Vec<PeerHandle>,
     hash: BlockHash,
-) -> Option<Block> {
+) -> Option<AnyBlock> {
     use futures::stream::StreamExt;
 
     let (send, mut recv) = futures::channel::mpsc::channel(1);
@@ -454,34 +517,37 @@ pub async fn fetch_block_raw(
             return Ok(None);
         }
     };
-    let mut serialized = Vec::new();
-    block
-        .consensus_encode(&mut serialized)
-        .map_err(Error::from)?;
-    let serialized = Bytes::from(serialized);
+    // The bytes the peer sent, which are the bytes that were verified. Serving
+    // a re-serialization would risk handing back something subtly different
+    // from what the hash, merkle and witness checks actually ran against.
+    let serialized = Bytes::from(block.raw().to_vec());
     state.block_cache.insert(hash, serialized.clone());
     Ok(Some(serialized))
 }
 
-pub async fn fetch_block(state: Arc<State>, hash: BlockHash) -> Result<Option<Block>, RpcError> {
+pub async fn fetch_block(state: Arc<State>, hash: BlockHash) -> Result<Option<AnyBlock>, RpcError> {
     Ok(match fetch_block_raw(state, hash).await? {
-        Some(block) => Some(
-            Block::consensus_decode(&mut std::io::Cursor::new(block.as_ref()))
-                .map_err(Error::from)?,
-        ),
+        // `AnyBlock` rather than `bitcoin::Block`, so the callers that read a
+        // block's transactions work on a header-v2 chain too. This is the path
+        // `getblock` verbosity 1 and `getrawtransaction` take.
+        Some(block) => Some(AnyBlock::parse(block.as_ref()).map_err(Error::from)?),
         None => None,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::check_witnesses;
+    use super::{read_frame, Frame};
+    use crate::any_block::AnyBlock;
     use bitcoin::blockdata::{
         block::{Block, BlockHeader},
         script::Script,
         transaction::{OutPoint, Transaction, TxIn, TxOut},
     };
+    use bitcoin::consensus::Decodable;
+    use bitcoin::hashes::Hash as _;
     use bitcoin::hashes::Hash;
+    use bitcoin::network::message::NetworkMessage;
 
     fn block(commitment: bool, witness: bool) -> Block {
         let mut commitment_spk = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
@@ -520,15 +586,118 @@ mod tests {
         }
     }
 
+    /// Frame a payload the way a peer does: magic, command, length, checksum.
+    fn frame(magic: u32, command: &[u8], payload: &[u8]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(24 + payload.len());
+        v.extend_from_slice(&magic.to_le_bytes());
+        let mut cmd = [0u8; 12];
+        cmd[..command.len()].copy_from_slice(command);
+        v.extend_from_slice(&cmd);
+        v.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        let digest = bitcoin::hashes::sha256d::Hash::hash(payload);
+        v.extend_from_slice(&digest.into_inner()[0..4]);
+        v.extend_from_slice(payload);
+        v
+    }
+
+    fn v2_block_bytes() -> Vec<u8> {
+        let doc: serde_json::Value =
+            serde_json::from_str(include_str!("tests/blake2b_regtest.json")).expect("json");
+        hex::decode(doc["blocks"]["131"]["raw"].as_str().expect("raw")).expect("hex")
+    }
+
+    /// The reason `read_frame` exists. A `block` message carrying a 164-byte
+    /// header must reach us as bytes; letting `rust-bitcoin` decode the frame
+    /// fails here, before any of the proxy's checks can run.
+    #[test]
+    fn a_v2_block_message_survives_framing() {
+        let raw = v2_block_bytes();
+        let wire = frame(0xDAB5BFFA, b"block", &raw);
+
+        // What the old path did, and it is worse than failing. rust-bitcoin
+        // decodes this frame happily and returns a block with no transactions
+        // and a hash that is not the block's, because it reads the transaction
+        // count from a hardcoded offset 80, which in a 164-byte header lands in
+        // the middle of `m_extranonce`. The proxy then compared that hash
+        // against the one it asked for and reported a mismatch, so the fetch
+        // failed for a reason that pointed nowhere near the cause.
+        let doc: serde_json::Value =
+            serde_json::from_str(include_str!("tests/blake2b_regtest.json")).expect("json");
+        let real_hash = doc["blocks"]["131"]["hash"].as_str().expect("hash");
+        let real_ntx = doc["blocks"]["131"]["ntx"].as_u64().expect("ntx") as usize;
+        match bitcoin::network::message::RawNetworkMessage::consensus_decode(
+            &mut std::io::Cursor::new(wire.clone()),
+        ) {
+            Err(_) => { /* also acceptable: it failed loudly */ }
+            Ok(m) => match m.payload {
+                NetworkMessage::Block(b) => {
+                    assert_ne!(b.block_hash().to_string(), real_hash, "hash");
+                    assert_ne!(b.txdata.len(), real_ntx, "transaction count");
+                }
+                _ => panic!("expected a block message"),
+            },
+        }
+
+        match read_frame(&mut std::io::Cursor::new(wire), 0xDAB5BFFA).expect("frames") {
+            Frame::Block(payload) => {
+                assert_eq!(payload, raw, "payload preserved byte for byte");
+                // And through the parser it becomes the block the chain knows.
+                let b = AnyBlock::parse(&payload).expect("parses");
+                assert_eq!(b.block_hash().to_string(), real_hash);
+                assert_eq!(b.txdata.len(), real_ntx);
+                assert!(b.check_merkle_root() && b.check_witnesses());
+            }
+            _ => panic!("expected a block frame"),
+        }
+    }
+
+    #[test]
+    fn a_non_block_message_still_goes_through_rust_bitcoin() {
+        let wire = frame(0xDAB5BFFA, b"verack", &[]);
+        match read_frame(&mut std::io::Cursor::new(wire), 0xDAB5BFFA).expect("frames") {
+            Frame::Other(m) => assert!(matches!(m.payload, NetworkMessage::Verack)),
+            _ => panic!("expected a decoded message"),
+        }
+    }
+
+    #[test]
+    fn a_frame_from_the_wrong_network_is_refused() {
+        let wire = frame(0xD9B4BEF9, b"verack", &[]);
+        assert!(read_frame(&mut std::io::Cursor::new(wire), 0xDAB5BFFA).is_err());
+    }
+
+    #[test]
+    fn a_corrupted_payload_is_caught_by_the_checksum() {
+        let raw = v2_block_bytes();
+        let mut wire = frame(0xDAB5BFFA, b"block", &raw);
+        let last = wire.len() - 1;
+        wire[last] ^= 0x01;
+        assert!(
+            read_frame(&mut std::io::Cursor::new(wire), 0xDAB5BFFA).is_err(),
+            "the checksum is ours to verify once rust-bitcoin no longer sees the payload"
+        );
+    }
+
+    #[test]
+    fn an_absurd_length_is_refused_before_allocating() {
+        let mut wire = frame(0xDAB5BFFA, b"block", &[]);
+        wire[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(read_frame(&mut std::io::Cursor::new(wire), 0xDAB5BFFA).is_err());
+    }
+
+    /// The rule `rust-bitcoin` does not have, which is the whole reason the
+    /// proxy does its own witness check. Kept here, pointed at `AnyBlock`,
+    /// because the check moved there when blocks stopped being `bitcoin::Block`.
     #[test]
     fn a_block_that_commits_to_witnesses_must_carry_them() {
         let stripped = block(true, false);
+        // rust-bitcoin is satisfied by this block. That is the problem.
         assert!(stripped.check_witness_commitment());
-        assert!(!check_witnesses(&stripped));
+        assert!(!AnyBlock::from(stripped).check_witnesses());
     }
 
     #[test]
     fn a_block_with_no_commitment_needs_no_witnesses() {
-        assert!(check_witnesses(&block(false, false)));
+        assert!(AnyBlock::from(block(false, false)).check_witnesses());
     }
 }
