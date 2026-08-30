@@ -33,6 +33,8 @@ bitcoin = { version = "0.29.2", features = ["serde"] }
 configure_me = { version = "0.4.0" }
 futures = "0.3.12"
 hex = "0.4.2"
+# BLAKE2b block identity on a header-v2 chain. Pulls in only constant_time_eq.
+blake2b_simd = "1"
 hmac = "0.12.1"
 http = "0.2.3"
 hyper = { version = "0.14.4", features = [
