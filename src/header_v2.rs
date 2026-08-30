@@ -394,4 +394,41 @@ mod tests {
         b[0..4].copy_from_slice(&0x2000_0000u32.to_le_bytes());
         assert!(HeaderV2::parse(&b).is_err(), "bit 31 is clear");
     }
+
+    /// Headers off the live BLAKE2b chain on Bitcoin mainnet.
+    ///
+    /// The published vectors are synthetic and prove the algorithm; these prove
+    /// it against what miners are actually producing, which is a different
+    /// claim and the one that was missing.
+    ///
+    /// 961731 is the useful one: a pool-mined header carrying a non-null
+    /// `xor_key`, with `xor_key_mask_clear_bits` of 47. The arithmetic it
+    /// reaches is not new, since vector `profile_3` already covers a non-zero
+    /// clear-byte count with the same partial-byte shift. What is new is that
+    /// it is not synthetic. Every other live header this crate is tested
+    /// against, here and in the regtest fixture, was solo-mined with a null
+    /// key, so the mask branch had never run on a header off a real chain.
+    #[test]
+    fn live_mainnet_headers_hash_to_what_the_chain_says() {
+        let doc: Value =
+            serde_json::from_str(include_str!("tests/blake2b_mainnet.json")).expect("valid json");
+        let headers = doc["headers"].as_array().expect("headers array");
+        assert!(!headers.is_empty(), "fixture is not empty");
+        for h in headers {
+            let raw = bytes(&h["header"]);
+            let height = h["height"].as_u64().expect("height");
+            let parsed = HeaderV2::parse(&raw).expect("v2 header parses");
+            assert_eq!(
+                parsed.block_hash().to_string(),
+                h["hash"].as_str().expect("hash"),
+                "height {}",
+                height
+            );
+            assert_eq!(
+                parsed.height as u64, height,
+                "header commits to its own height"
+            );
+            assert_eq!(parsed.serialize(), raw, "height {} re-serializes", height);
+        }
+    }
 }
