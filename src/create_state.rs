@@ -111,13 +111,22 @@ pub fn create_state() -> Result<(State, SocketAddr), Error> {
         }
     }
     if let Some(conf) = config.passthrough_rpccookie {
-        for line in std::fs::read_to_string(conf)?.lines() {
-            if let Some((uname, pass)) = line.trim().split_once(":") {
+        // Only the user half is taken now. It is the map key, and bitcoind
+        // always writes the same one (`__cookie__`). The password half is read
+        // from the file at comparison time instead of being copied in here,
+        // because bitcoind replaces the whole cookie every time it starts: a
+        // copy taken now is wrong from the node's next restart onwards, and
+        // wrong in the way that answers every caller 401 forever.
+        for line in std::fs::read_to_string(&conf)?.lines() {
+            if let Some((uname, _)) = line.trim().split_once(":") {
                 users.insert(
                     uname.into(),
                     btc_rpc_proxy::users::input::User {
                         allowed_calls: None,
-                        password: Password::Cleartext(pass.to_owned()),
+                        password: Password::CookieFile {
+                            path: conf.clone(),
+                            cached: std::sync::RwLock::new(None),
+                        },
                         fetch_blocks: None,
                         override_wallet: None,
                     },
