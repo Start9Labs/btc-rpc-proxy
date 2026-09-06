@@ -111,12 +111,8 @@ pub fn create_state() -> Result<(State, SocketAddr), Error> {
         }
     }
     if let Some(conf) = config.passthrough_rpccookie {
-        // Only the user half is taken now. It is the map key, and bitcoind
-        // always writes the same one (`__cookie__`). The password half is read
-        // from the file at comparison time instead of being copied in here,
-        // because bitcoind replaces the whole cookie every time it starts: a
-        // copy taken now is wrong from the node's next restart onwards, and
-        // wrong in the way that answers every caller 401 forever.
+        // The user half is the map key and is stable; the password half is
+        // read at comparison time because bitcoind rewrites it on every start.
         for line in std::fs::read_to_string(&conf)?.lines() {
             if let Some((uname, _)) = line.trim().split_once(":") {
                 users.insert(

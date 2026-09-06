@@ -55,16 +55,8 @@ fn version_message(magic: u32) -> RawNetworkMessage {
 
 const COMMITMENT_MAGIC: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 
-/// The witness check `rust-bitcoin` does not provide.
-///
 /// `Block::check_witness_commitment` returns true for any block with no
 /// witnesses at all, which is exactly what a stripping peer returns.
-///
-/// Rejecting "commits but carries none" on sight is not the answer either,
-/// because honest blocks have that shape too; see `check_witness_commitment`.
-/// Verify the commitment instead. Stripping is still caught, because the
-/// commitment covers wtxids: remove the witnesses and every wtxid collapses
-/// onto its txid, so the root stops reproducing what the miner committed to.
 fn check_witnesses(block: &Block) -> bool {
     let commits = block.txdata.first().map_or(false, |coinbase| {
         coinbase.output.iter().any(|o| {
@@ -72,9 +64,7 @@ fn check_witnesses(block: &Block) -> bool {
         })
     });
     if !commits {
-        // Nothing to verify against. BIP141 requires a commitment from any
-        // block carrying witness data, so witnesses without one are wrong; no
-        // witnesses and no commitment is simply a pre-SegWit block.
+        // BIP141 requires a commitment from any block carrying witness data.
         return !block
             .txdata
             .iter()
@@ -83,23 +73,9 @@ fn check_witnesses(block: &Block) -> bool {
     check_witness_commitment(block)
 }
 
-/// `Block::check_witness_commitment` with two differences: it does not wave
-/// through a block that carries no witnesses, and it tolerates a coinbase
-/// carrying no witness at all.
-///
-/// BIP141 has the coinbase hold the 32-byte reserved value the commitment is
-/// salted with, but that only became a consensus rule when SegWit activated.
-/// Blocks mined during the signalling period carry the commitment output with
-/// no coinbase witness behind it, and they are valid and on mainnet. 434499 is
-/// one, and rejecting it is where a pruned node's block fetch stops dead:
-/// every peer returns the same block, so every peer "fails", the block is
-/// never fetched, and the index can never pass that height. Those miners
-/// salted with 32 zero bytes, which is what a missing reserved value means
-/// here.
-///
-/// This does not soften the stripping check. The root is computed over the
-/// wtxids actually present, so a block whose witnesses were removed stops
-/// reproducing the miner's commitment whatever the salt.
+/// The coinbase reserved value became a consensus rule only at SegWit
+/// activation, so a signalling-era block commits with no coinbase witness
+/// behind it -- mainnet 434499 onwards. Those salt with 32 zero bytes.
 fn check_witness_commitment(block: &Block) -> bool {
     use bitcoin::hashes::Hash as _;
 
@@ -125,9 +101,6 @@ fn check_witness_commitment(block: &Block) -> bool {
         Some(root) => root,
         None => return false,
     };
-    // A coinbase with no witness at all is the signalling-period shape
-    // described above, and salts with zeros. Anything other than a single
-    // 32-byte item is malformed and stays rejected.
     const ZERO_RESERVED: [u8; 32] = [0u8; 32];
     let witness_vec: Vec<_> = coinbase.input[0].witness.iter().collect();
     let reserved: &[u8] = match witness_vec.len() {

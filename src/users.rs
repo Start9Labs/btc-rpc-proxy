@@ -68,25 +68,13 @@ mod password {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
-    // No `PartialEq` derive: `CookieFile` holds a lock, and comparing one
-    // password to another is not something anything here does. The comparison
-    // that matters is `PartialEq<&str>`, below.
     #[derive(serde::Deserialize)]
     #[serde(try_from = "String")]
     pub enum Password {
         Cleartext(String),
         Hash(String, Vec<u8>),
-        /// The password half of a bitcoind cookie file, re-read whenever the
-        /// file changes underneath us.
-        ///
-        /// bitcoind writes a fresh cookie every time it starts. Reading one at
-        /// startup and holding it forever means that the moment the node
-        /// restarts, the proxy is checking callers against a password that no
-        /// longer exists and answering all of them 401. Nothing recovers from
-        /// that on its own: a client can restart as often as it likes, because
-        /// the stale half is here. That is a permanent outage for any dependent
-        /// (electrs indexes nothing, and crash-loops) until somebody thinks to
-        /// restart the proxy itself.
+        /// bitcoind writes a fresh cookie every time it starts, so this is
+        /// re-read rather than copied once.
         CookieFile {
             path: PathBuf,
             cached: RwLock<Option<(SystemTime, String)>>,
@@ -94,14 +82,8 @@ mod password {
     }
 
     impl Password {
-        /// The current password half of the cookie at `path`, reading the file
-        /// only when its mtime has moved.
-        ///
-        /// A cookie is `user:password`, and only the password half is compared;
-        /// the user half is the map key and does not change. Any failure to
-        /// read is `None`, which fails the comparison and answers 401, exactly
-        /// as a wrong password does. That is the right answer while the node is
-        /// down and the file is missing.
+        /// `None` on any read failure, which fails the comparison the same way
+        /// a wrong password does -- the right answer while the node is down.
         fn cookie_password(
             path: &PathBuf,
             cached: &RwLock<Option<(SystemTime, String)>>,
@@ -120,10 +102,8 @@ mod password {
                 .split_once(':')?
                 .1
                 .to_owned();
-            // Re-stat after reading rather than trusting the value from before
-            // it: if the file changed in between, this caches the mtime of
-            // contents we did not read and would then serve them until the next
-            // change. Failing to stat just means no caching this time round.
+            // Re-stat after the read: a file replaced mid-read must not be
+            // cached against the mtime of contents that were never read.
             if let (Ok(mtime), Ok(mut guard)) = (
                 std::fs::metadata(path).and_then(|m| m.modified()),
                 cached.write(),
@@ -226,8 +206,6 @@ mod password {
                 .is_ok(),
                 Self::CookieFile { path, cached } => {
                     match Password::cookie_password(path, cached) {
-                        // Compared the same way as `Cleartext`, because that is
-                        // what it is once read.
                         Some(pw) if !pw.is_empty() => {
                             let bits = xor_contents(pw.as_bytes(), other.as_bytes());
                             unsafe { std::ptr::read_volatile(&bits) == 0 }
