@@ -111,13 +111,18 @@ pub fn create_state() -> Result<(State, SocketAddr), Error> {
         }
     }
     if let Some(conf) = config.passthrough_rpccookie {
-        for line in std::fs::read_to_string(conf)?.lines() {
-            if let Some((uname, pass)) = line.trim().split_once(":") {
+        // The user half is the map key and is stable; the password half is
+        // read at comparison time because bitcoind rewrites it on every start.
+        for line in std::fs::read_to_string(&conf)?.lines() {
+            if let Some((uname, _)) = line.trim().split_once(":") {
                 users.insert(
                     uname.into(),
                     btc_rpc_proxy::users::input::User {
                         allowed_calls: None,
-                        password: Password::Cleartext(pass.to_owned()),
+                        password: Password::CookieFile {
+                            path: conf.clone(),
+                            cached: std::sync::RwLock::new(None),
+                        },
                         fetch_blocks: None,
                         override_wallet: None,
                     },
