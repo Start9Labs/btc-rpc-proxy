@@ -417,13 +417,16 @@ impl RpcClient {
                     let forwarded_res: Vec<Value> = serde_json::from_slice(body.as_ref())?;
                     Ok(answered.into_iter().zip(forwarded_res).collect())
                 }
-                let (forwarded, intercepted) = match futures::try_join!(
+                let (mut forwarded, mut intercepted) = match futures::try_join!(
                     send_batch(self, path, forwarded_recv),
                     intercepted_recv.try_collect::<Vec<_>>()
                 ) {
                     Ok(a) => a,
                     Err(e) => return Ok(RpcResponse::from(e).into_response()?),
                 };
+                // Both arrive as their calls finish; merge_by needs request order.
+                forwarded.sort_by_key(|(idx, _)| *idx);
+                intercepted.sort_by_key(|(idx, _)| *idx);
                 let res_vec: Vec<Value> = forwarded
                     .into_iter()
                     .merge_by(intercepted, |(a, _), (b, _)| a < b)
