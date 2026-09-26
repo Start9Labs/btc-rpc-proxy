@@ -360,6 +360,7 @@ impl User {
                             let hash =
                                 serde_json::from_value(params[0].clone()).map_err(Error::from)?;
                             let fetch_header_req = RpcRequest {
+                                jsonrpc: None,
                                 id: None,
                                 method: GetBlockHeader,
                                 params: GetBlockHeaderParams(hash, Some(true)),
@@ -502,11 +503,13 @@ impl User {
         // included, so Core renders them rather than this reproducing them. The
         // six that remain come from the header, which Core keeps when pruned.
         let decode_req = RpcRequest {
+            jsonrpc: None,
             id: None,
             method: DecodeRawTransaction,
             params: (hex.clone(),),
         };
         let header_req = RpcRequest {
+            jsonrpc: None,
             id: None,
             method: GetBlockHeader,
             params: GetBlockHeaderParams(blockhash, Some(true)),

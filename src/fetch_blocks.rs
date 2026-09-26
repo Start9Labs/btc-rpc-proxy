@@ -151,6 +151,7 @@ impl Peers {
         Ok(Self {
             peers: client
                 .call(&RpcRequest {
+                    jsonrpc: None,
                     id: None,
                     method: GetPeerInfo,
                     params: [],
@@ -351,6 +352,7 @@ async fn fetch_block_from_self(state: &State, hash: BlockHash) -> Result<Option<
     match state
         .rpc_client
         .call(&RpcRequest {
+            jsonrpc: None,
             id: None,
             method: GetBlock,
             params: GetBlockParams(hash, Some(0)),

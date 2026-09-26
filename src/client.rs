@@ -65,13 +65,17 @@ impl<'de> Deserialize<'de> for SingleOrBatchRpcRequest {
                 self,
                 mut map: A,
             ) -> Result<Self::Value, A::Error> {
+                let mut jsonrpc = None;
                 let mut id = None;
                 let mut method = None;
                 let mut params = None;
                 while let Some(key) = map.next_key()? {
                     match key {
+                        "jsonrpc" => {
+                            jsonrpc = map.next_value()?;
+                        }
                         "id" => {
-                            id = map.next_value()?;
+                            id = Some(map.next_value()?);
                         }
                         "method" => {
                             method = map.next_value()?;
@@ -85,6 +89,7 @@ impl<'de> Deserialize<'de> for SingleOrBatchRpcRequest {
                     }
                 }
                 Ok(SingleOrBatchRpcRequest::Single(RpcRequest {
+                    jsonrpc,
                     id,
                     method: method.ok_or_else(|| serde::de::Error::missing_field("method"))?,
                     params: params.ok_or_else(|| serde::de::Error::missing_field("params"))?,
@@ -168,11 +173,30 @@ impl std::ops::Deref for GenericRpcMethod {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct RpcRequest<T: RpcMethod> {
+    /// Forwarded as sent: bitcoind answers in the version it was asked in.
     #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jsonrpc: Option<Value>,
+    #[serde(default, deserialize_with = "present")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<Value>,
     pub method: T,
     pub params: T::Params,
+}
+impl<T: RpcMethod> RpcRequest<T> {
+    pub fn is_v2(&self) -> bool {
+        self.jsonrpc.as_ref().and_then(Value::as_str) == Some("2.0")
+    }
+    /// A 2.0 request without an id, which bitcoind runs but never answers.
+    pub fn is_notification(&self) -> bool {
+        self.id.is_none() && self.is_v2()
+    }
+}
+
+/// Keeps `"id": null` apart from a missing id: bitcoind echoes the first and
+/// treats the second, on a 2.0 request, as a notification.
+fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, thiserror::Error, serde::Serialize, serde::Deserialize)]
@@ -180,6 +204,8 @@ pub struct RpcRequest<T: RpcMethod> {
 pub struct RpcError {
     pub code: i64,
     pub message: String,
+    /// The HTTP answer for a request the proxy refuses or cannot serve, in
+    /// either JSON-RPC version.
     #[serde(skip)]
     pub status: Option<StatusCode>,
 }
@@ -242,6 +268,38 @@ impl<T: RpcMethod> RpcResponse<T> {
             .body(body.into())?)
     }
 }
+impl RpcResponse<GenericRpcMethod> {
+    /// A reply the proxy wrote itself, shaped as bitcoind would answer `req`.
+    fn into_reply(self, req: &RpcRequest<GenericRpcMethod>) -> Value {
+        let id = req.id.clone().unwrap_or(Value::Null);
+        if !req.is_v2() {
+            return serde_json::json!({ "id": id, "error": self.error, "result": self.result });
+        }
+        // 2.0 carries only the member that applies.
+        match self.error {
+            Some(error) => serde_json::json!({ "jsonrpc": "2.0", "error": error, "id": id }),
+            None => serde_json::json!({ "jsonrpc": "2.0", "result": self.result, "id": id }),
+        }
+    }
+    fn into_response_to(self, req: &RpcRequest<GenericRpcMethod>) -> Result<Response<Body>, Error> {
+        let status = match self.error.as_ref().and_then(|e| e.status) {
+            Some(s) => s,
+            None if req.is_notification() => {
+                return Ok(Response::builder()
+                    .status(StatusCode::NO_CONTENT)
+                    .body(Body::empty())?)
+            }
+            // 2.0 reports a failed call in the body of a 200.
+            None if self.error.is_some() && !req.is_v2() => StatusCode::INTERNAL_SERVER_ERROR,
+            None => StatusCode::OK,
+        };
+        let body = serde_json::to_vec(&self.into_reply(req))?;
+        Ok(Response::builder()
+            .status(status)
+            .header(CONTENT_LENGTH, body.len())
+            .body(body.into())?)
+    }
+}
 
 #[derive(Debug)]
 pub struct RpcClient {
@@ -273,12 +331,8 @@ impl RpcClient {
         match req {
             SingleOrBatchRpcRequest::Single(req) => {
                 Ok(if let Some(res) = intercept(path, req).await.transpose() {
-                    res.unwrap_or_else(|e| RpcResponse {
-                        id: req.id.clone(),
-                        result: None,
-                        error: Some(e),
-                    })
-                    .into_response()?
+                    res.unwrap_or_else(RpcResponse::from)
+                        .into_response_to(req)?
                 } else {
                     let mut parts = self.uri.clone().into_parts();
                     parts.path_and_query = Some(path.parse()?);
@@ -303,8 +357,9 @@ impl RpcClient {
                         let forwarded_send = forwarded_send.clone();
                         async move {
                             match intercept_fn(path, req).await.transpose() {
+                                Some(Ok(_)) if req.is_notification() => (),
                                 Some(res) => intercepted_send
-                                    .unbounded_send(res.map(|res| (idx, res)))
+                                    .unbounded_send(res.map(|res| (idx, res.into_reply(req))))
                                     .unwrap(),
                                 None => forwarded_send.unbounded_send((idx, req)).unwrap(),
                             }
@@ -315,9 +370,16 @@ impl RpcClient {
                     client: &RpcClient,
                     path: &str,
                     forwarded_recv: mpsc::UnboundedReceiver<(usize, &RpcRequest<GenericRpcMethod>)>,
-                ) -> Result<Vec<(usize, RpcResponse<GenericRpcMethod>)>, RpcError> {
+                ) -> Result<Vec<(usize, Value)>, RpcError> {
                     let (idxs, new_batch): (Vec<usize>, Vec<_>) =
                         forwarded_recv.collect::<Vec<_>>().await.into_iter().unzip();
+                    // bitcoind leaves notifications out of its reply.
+                    let answered: Vec<usize> = idxs
+                        .into_iter()
+                        .zip(&new_batch)
+                        .filter(|(_, req)| !req.is_notification())
+                        .map(|(idx, _)| idx)
+                        .collect();
                     let mut parts = client.uri.clone().into_parts();
                     parts.path_and_query = Some(path.parse().map_err(Error::from)?);
                     let authorization = match client.authorization.try_load().await {
@@ -346,23 +408,35 @@ impl RpcClient {
                         )
                         .await
                         .map_err(Error::from)?;
+                    // All notifications: no content, and nothing to pair.
+                    if response.status() == StatusCode::NO_CONTENT {
+                        return Ok(Vec::new());
+                    }
                     let body = to_bytes(response.into_body()).await.map_err(Error::from)?;
-                    let forwarded_res: Vec<RpcResponse<GenericRpcMethod>> =
-                        serde_json::from_slice(body.as_ref())?;
-                    Ok(idxs.into_iter().zip(forwarded_res).collect())
+                    // Kept as bitcoind wrote them, so each reply keeps its version.
+                    let forwarded_res: Vec<Value> = serde_json::from_slice(body.as_ref())?;
+                    Ok(answered.into_iter().zip(forwarded_res).collect())
                 }
-                let (forwarded, intercepted) = match futures::try_join!(
+                let (mut forwarded, mut intercepted) = match futures::try_join!(
                     send_batch(self, path, forwarded_recv),
                     intercepted_recv.try_collect::<Vec<_>>()
                 ) {
                     Ok(a) => a,
                     Err(e) => return Ok(RpcResponse::from(e).into_response()?),
                 };
-                let res_vec: Vec<RpcResponse<GenericRpcMethod>> = forwarded
+                // Both arrive as their calls finish; merge_by needs request order.
+                forwarded.sort_by_key(|(idx, _)| *idx);
+                intercepted.sort_by_key(|(idx, _)| *idx);
+                let res_vec: Vec<Value> = forwarded
                     .into_iter()
                     .merge_by(intercepted, |(a, _), (b, _)| a < b)
                     .map(|(_, res)| res)
                     .collect();
+                if res_vec.is_empty() && !reqs.is_empty() {
+                    return Ok(Response::builder()
+                        .status(StatusCode::NO_CONTENT)
+                        .body(Body::empty())?);
+                }
                 let body = serde_json::to_vec(&res_vec)?;
                 Ok(Response::builder()
                     .header(CONTENT_LENGTH, body.len())
@@ -386,7 +460,7 @@ impl RpcClient {
             .await?;
         let status = response.status();
         let body = to_bytes(response.into_body()).await?;
-        let mut rpc_response: RpcResponse<T> =
+        let rpc_response: RpcResponse<T> =
             serde_json::from_slice(&body).map_err(|serde_error| {
                 match std::str::from_utf8(&body) {
                     Ok(body) => ClientError::ParseResponseUtf8 {
@@ -402,9 +476,6 @@ impl RpcClient {
                     },
                 }
             })?;
-        if let Some(ref mut error) = rpc_response.error {
-            error.status = Some(status);
-        }
         Ok(rpc_response)
     }
 }
@@ -560,4 +631,137 @@ pub enum AuthLoadError {
     },
     #[error("invalid header value")]
     HeaderValue(#[from] http::header::InvalidHeaderValue),
+}
+
+#[cfg(test)]
+mod tests {
+    use hyper::{body::HttpBody, StatusCode};
+    use serde_json::{json, Value};
+
+    use super::{
+        GenericRpcMethod, RpcError, RpcRequest, RpcResponse, SingleOrBatchRpcRequest,
+        MISC_ERROR_CODE,
+    };
+
+    fn request(value: Value) -> RpcRequest<GenericRpcMethod> {
+        serde_json::from_value(value).expect("valid request")
+    }
+
+    fn parse(value: Value) -> SingleOrBatchRpcRequest {
+        serde_json::from_str(&value.to_string()).expect("valid request")
+    }
+
+    fn success() -> RpcResponse<GenericRpcMethod> {
+        RpcResponse {
+            id: None,
+            error: None,
+            result: Some(json!(42)),
+        }
+    }
+
+    fn failure(status: Option<StatusCode>) -> RpcResponse<GenericRpcMethod> {
+        RpcResponse::from(RpcError {
+            code: MISC_ERROR_CODE,
+            message: "nope".to_owned(),
+            status,
+        })
+    }
+
+    /// bitcoind answers in the version it is asked in, so the version has to
+    /// reach it, and a caller that sent none must not be given one.
+    #[test]
+    fn the_version_is_forwarded_as_sent() {
+        for sent in [
+            json!({"jsonrpc": "2.0", "id": 1, "method": "m", "params": []}),
+            json!({"id": 1, "method": "m", "params": []}),
+            json!([
+                {"jsonrpc": "2.0", "id": 1, "method": "m", "params": []},
+                {"id": 2, "method": "m", "params": []},
+            ]),
+        ] {
+            assert_eq!(serde_json::to_value(parse(sent.clone())).unwrap(), sent);
+        }
+    }
+
+    /// A null id still gets an answer; a missing one makes a 2.0 request a
+    /// notification. Forwarding the first without its id would turn it into
+    /// the second.
+    #[test]
+    fn a_null_id_is_not_a_missing_id() {
+        for sent in [
+            json!({"jsonrpc": "2.0", "id": null, "method": "m", "params": []}),
+            json!([{"jsonrpc": "2.0", "id": null, "method": "m", "params": []}]),
+        ] {
+            assert_eq!(serde_json::to_value(parse(sent.clone())).unwrap(), sent);
+        }
+        let null_id = request(json!({"jsonrpc": "2.0", "id": null, "method": "m", "params": []}));
+        assert!(!null_id.is_notification());
+        let missing = request(json!({"jsonrpc": "2.0", "method": "m", "params": []}));
+        assert!(missing.is_notification());
+        let legacy = request(json!({"method": "m", "params": []}));
+        assert!(!legacy.is_notification());
+    }
+
+    /// A 2.0 reply carries exactly one of `result` and `error`, a 1.0 reply
+    /// both, and either carries the request's id.
+    #[test]
+    fn a_proxy_reply_takes_the_shape_of_its_request() {
+        let v2 = request(json!({"jsonrpc": "2.0", "id": 7, "method": "m", "params": []}));
+        let v1 = request(json!({"id": 7, "method": "m", "params": []}));
+        let error = json!({"code": MISC_ERROR_CODE, "message": "nope"});
+
+        assert_eq!(
+            success().into_reply(&v2),
+            json!({"jsonrpc": "2.0", "result": 42, "id": 7})
+        );
+        assert_eq!(
+            failure(None).into_reply(&v2),
+            json!({"jsonrpc": "2.0", "error": error, "id": 7})
+        );
+        let empty = RpcResponse {
+            id: None,
+            error: None,
+            result: None,
+        };
+        assert_eq!(
+            empty.into_reply(&v2),
+            json!({"jsonrpc": "2.0", "result": null, "id": 7})
+        );
+        assert_eq!(
+            success().into_reply(&v1),
+            json!({"id": 7, "error": null, "result": 42})
+        );
+        assert_eq!(
+            failure(None).into_reply(&v1),
+            json!({"id": 7, "error": error, "result": null})
+        );
+    }
+
+    /// bitcoind reports a failed 2.0 call with a 200 and a failed 1.0 call
+    /// with an error status, keeps a refusal's own status, and answers a
+    /// notification with no content.
+    #[test]
+    fn a_proxy_reply_takes_the_status_bitcoind_would_send() {
+        let v2 = request(json!({"jsonrpc": "2.0", "id": 7, "method": "m", "params": []}));
+        let v1 = request(json!({"id": 7, "method": "m", "params": []}));
+        let notification = request(json!({"jsonrpc": "2.0", "method": "m", "params": []}));
+        let status = |res: RpcResponse<GenericRpcMethod>, req| {
+            res.into_response_to(req).expect("response").status()
+        };
+
+        assert_eq!(status(failure(None), &v2), StatusCode::OK);
+        assert_eq!(
+            status(failure(None), &v1),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        for req in [&v1, &v2, &notification] {
+            assert_eq!(
+                status(failure(Some(StatusCode::FORBIDDEN)), req),
+                StatusCode::FORBIDDEN
+            );
+        }
+        let res = success().into_response_to(&notification).unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert_eq!(res.body().size_hint().exact(), Some(0));
+    }
 }
