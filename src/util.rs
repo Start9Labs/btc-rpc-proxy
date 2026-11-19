@@ -21,7 +21,6 @@ impl std::ops::Deref for HexBytes {
     }
 }
 
-
 impl Serialize for HexBytes {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         hex::encode(self.0.as_ref()).serialize(serializer)

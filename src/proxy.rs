@@ -29,7 +29,8 @@ pub async fn proxy_request(
                     Ok(req) => {
                         let state_local = state.clone();
                         let name_local = Arc::new(name);
-                        let path = user.override_wallet
+                        let path = user
+                            .override_wallet
                             .as_ref()
                             .map(AsRef::as_ref)
                             .unwrap_or(parts.uri.path());

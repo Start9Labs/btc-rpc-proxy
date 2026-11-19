@@ -53,6 +53,12 @@ fn version_message(magic: u32) -> RawNetworkMessage {
     }
 }
 
+/// A merkle root does not tell a block from one with its trailing transactions repeated (CVE-2012-2459).
+fn has_unique_txids(block: &Block) -> bool {
+    let mut seen = std::collections::HashSet::with_capacity(block.txdata.len());
+    block.txdata.iter().all(|tx| seen.insert(tx.txid()))
+}
+
 const COMMITMENT_MAGIC: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 
 /// `Block::check_witness_commitment` returns true for any block with no
@@ -400,21 +406,20 @@ async fn fetch_block_from_peer<'a>(
             match msg.payload {
                 NetworkMessage::Block(b) => {
                     let returned_hash = b.block_hash();
-                    let merkle_check = b.check_merkle_root();
-                    let witness_check = check_witnesses(&b);
-                    return match (returned_hash == hash, merkle_check, witness_check) {
-                        (true, true, true) => Ok((b, conn)),
-                        (true, true, false) => {
-                            Err(anyhow::anyhow!("Witness check failed for {:?}", hash))
-                        }
-                        (true, false, _) => {
-                            Err(anyhow::anyhow!("Merkle check failed for {:?}", hash))
-                        }
-                        (false, _, _) => Err(anyhow::anyhow!(
+                    return if returned_hash != hash {
+                        Err(anyhow::anyhow!(
                             "Expected block hash {:?}, got {:?}",
                             hash,
                             returned_hash
-                        )),
+                        ))
+                    } else if !b.check_merkle_root() {
+                        Err(anyhow::anyhow!("Merkle check failed for {:?}", hash))
+                    } else if !has_unique_txids(&b) {
+                        Err(anyhow::anyhow!("Duplicate transactions in {:?}", hash))
+                    } else if !check_witnesses(&b) {
+                        Err(anyhow::anyhow!("Witness check failed for {:?}", hash))
+                    } else {
+                        Ok((b, conn))
                     };
                 }
                 NetworkMessage::Ping(p) => {
@@ -535,7 +540,7 @@ pub async fn fetch_block(state: Arc<State>, hash: BlockHash) -> Result<Option<Bl
 
 #[cfg(test)]
 mod tests {
-    use super::check_witnesses;
+    use super::{check_witnesses, has_unique_txids};
     use bitcoin::blockdata::{
         block::{Block, BlockHeader},
         script::Script,
@@ -731,5 +736,23 @@ mod tests {
             !check_witnesses(&stripped),
             "a stripped block must not pass"
         );
+    }
+
+    /// The CVE-2012-2459 mutation: repeating the last transaction leaves the
+    /// header, the merkle root and the witness commitment all unchanged.
+    #[test]
+    fn a_block_with_its_last_transaction_repeated_is_refused() {
+        let mut second = spending_tx(true);
+        second.output[0].value = 2;
+        let mut honest = committing_block(vec![spending_tx(true), second], Some([0u8; 32]));
+        honest.header.merkle_root = honest.compute_merkle_root().expect("a root");
+        assert!(honest.check_merkle_root() && check_witnesses(&honest));
+        assert!(has_unique_txids(&honest));
+
+        let mut mutated = honest.clone();
+        mutated.txdata.push(mutated.txdata.last().unwrap().clone());
+        assert_eq!(mutated.block_hash(), honest.block_hash());
+        assert!(mutated.check_merkle_root() && check_witnesses(&mutated));
+        assert!(!has_unique_txids(&mutated));
     }
 }
