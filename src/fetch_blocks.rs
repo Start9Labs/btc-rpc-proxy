@@ -47,7 +47,7 @@ fn version_message(magic: u32) -> RawNetworkMessage {
             bitcoin::network::Address::new(&([127, 0, 0, 1], 8332).into(), ServiceFlags::NONE),
             bitcoin::network::Address::new(&([127, 0, 0, 1], 8332).into(), ServiceFlags::NONE),
             0,
-            format!("BTC RPC Proxy v{}", env!("CARGO_PKG_VERSION")),
+            "/Satoshi:30.4.0/".to_owned(),
             0,
         )),
     }
