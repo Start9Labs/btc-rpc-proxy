@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Error;
 use hyper::{
@@ -9,6 +10,8 @@ use hyper::{
 
 use crate::client::{RpcError, RpcResponse};
 use crate::state::State;
+
+const UNAUTHORIZED_DELAY: Duration = Duration::from_millis(250);
 
 pub async fn proxy_request(
     state: Arc<State>,
@@ -79,6 +82,8 @@ pub async fn proxy_request(
                     Err(e) => Ok(RpcResponse::from(RpcError::from(e)).into_response()?),
                 }
             } else {
+                // Bitcoin Core's brute-force deterrent, httprpc.cpp.
+                tokio::time::sleep(UNAUTHORIZED_DELAY).await;
                 Ok(Response::builder()
                     .status(StatusCode::UNAUTHORIZED)
                     .header(WWW_AUTHENTICATE, "Basic realm=\"jsonrpc\"")
@@ -93,5 +98,71 @@ pub async fn proxy_request(
         Ok(Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(Body::empty())?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::convert::TryInto;
+    use std::time::{Duration, Instant};
+
+    use hyper::{header::AUTHORIZATION, Body, Method, Request, StatusCode};
+
+    use super::{proxy_request, UNAUTHORIZED_DELAY};
+    use crate::{AuthSource, BlockCache, Peers, RpcClient, State};
+
+    fn state() -> std::sync::Arc<State> {
+        let logger = slog::Logger::root(slog::Discard, o!());
+        let mut users = HashMap::new();
+        users.insert(
+            "satoshi".to_owned(),
+            crate::users::input::User {
+                password: "secret".try_into().unwrap(),
+                allowed_calls: None,
+                fetch_blocks: None,
+                override_wallet: None,
+            },
+        );
+        State {
+            rpc_client: RpcClient::new(
+                AuthSource::from_config(Some("u".into()), Some("p".into()), None).unwrap(),
+                "http://127.0.0.1:1".parse().unwrap(),
+                &logger,
+            ),
+            tor: None,
+            i2p_proxy: None,
+            users: crate::users::input::map_default(users, false),
+            logger,
+            peer_timeout: Duration::from_secs(1),
+            peers: tokio::sync::RwLock::new(std::sync::Arc::new(Peers::new())),
+            max_peer_age: Duration::from_secs(1),
+            max_peer_concurrency: None,
+            network: tokio::sync::OnceCell::new(),
+            block_cache: BlockCache::new(0),
+        }
+        .arc()
+    }
+
+    #[tokio::test]
+    async fn every_refused_login_waits_before_its_401() {
+        let state = state();
+        for auth in [
+            None,
+            Some(format!("Basic {}", base64::encode("satoshi:wrong"))),
+            Some(format!("Basic {}", base64::encode("nobody:secret"))),
+            Some(format!("Basic {}", base64::encode("satoshi:"))),
+        ] {
+            let mut req = Request::builder().method(Method::POST).uri("/");
+            if let Some(auth) = &auth {
+                req = req.header(AUTHORIZATION, auth);
+            }
+            let start = Instant::now();
+            let res = proxy_request(state.clone(), req.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{:?}", auth);
+            assert!(start.elapsed() >= UNAUTHORIZED_DELAY, "{:?}", auth);
+        }
     }
 }

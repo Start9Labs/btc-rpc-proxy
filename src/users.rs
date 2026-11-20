@@ -179,6 +179,9 @@ mod password {
             // timing safe equality
             #[inline(never)]
             fn xor_contents(a: &[u8], b: &[u8]) -> usize {
+                if b.is_empty() {
+                    return a.len();
+                }
                 a.iter()
                     .enumerate()
                     .map(|(i, byte)| *byte ^ b[i % b.len()])
@@ -194,16 +197,11 @@ mod password {
                     let bits = xor_contents(pw.as_bytes(), other.as_bytes());
                     unsafe { std::ptr::read_volatile(&bits) == 0 }
                 }
-                Self::Hash(salt, hash) => (|| {
-                    let mut mac = Hmac::<Sha256>::new_from_slice(salt.as_bytes())?;
-                    mac.update(other.as_bytes());
-                    if mac.finalize().into_bytes().as_slice() != &hash[..] {
-                        Err(anyhow::anyhow!("password does not match"))
-                    } else {
-                        Ok(())
-                    }
-                })()
-                .is_ok(),
+                Self::Hash(salt, hash) => Hmac::<Sha256>::new_from_slice(salt.as_bytes())
+                    .is_ok_and(|mut mac| {
+                        mac.update(other.as_bytes());
+                        mac.verify_slice(hash).is_ok()
+                    }),
                 Self::CookieFile { path, cached } => {
                     match Password::cookie_password(path, cached) {
                         Some(pw) if !pw.is_empty() => {
@@ -223,7 +221,17 @@ mod password {
         let salt = "eef909bebf93e7cd1d714af9c3daf1f1".to_owned();
         let hash = hex::decode("ff9123dfba51640705a0cd977faa98033f537f5930942b566b44639f8c63057b")
             .unwrap();
-        assert_eq!(Password::Hash(salt, hash), "bar");
+        let pw = Password::Hash(salt, hash);
+        assert_eq!(pw, "bar");
+        assert!(!(pw == "baz"));
+        assert!(!(pw == "bar "));
+        assert!(!(pw == ""));
+    }
+
+    #[test]
+    fn an_empty_password_is_refused_not_a_panic() {
+        assert!(!(Password::Cleartext("secret".to_owned()) == ""));
+        assert!(Password::Cleartext(String::new()) == "");
     }
 
     /// The cookie has to be followed, not copied.
